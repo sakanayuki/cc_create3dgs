@@ -1,0 +1,664 @@
+<title>PhotoSplat</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Shippori+Mincho+B1:wght@600&family=Zen+Kaku+Gothic+New:wght@400;500;700&family=IBM+Plex+Mono:wght@400;600&display=swap">
+
+<style>
+:root{
+  color-scheme: light;
+  --bg:#F4F7F6; --surface:#FFFFFF; --surface-2:#E9EFEE; --surface-3:#DFE8E6;
+  --ink:#101817; --ink-2:#475856; --ink-3:#758785;
+  --line:#D6E2E0; --line-strong:#B9CCC9;
+  --accent:#00786C; --accent-ink:#005A50; --accent-soft:#DCF0ED;
+  --warn:#8F4B08; --warn-soft:#F8E9D8;
+  --danger:#9E2B23; --danger-soft:#F9E3E1;
+  --good:#286B3C;
+  /* categorical (validated, light) */
+  --s1:#00a396; --s2:#eb6834; --s3:#2a78d6; --s4:#eda100; --s5:#e87ba4;
+  --s-idle:#C3D2CF;
+  /* ordinal teal ramp (validated, light) — dark = large */
+  --seq-1:#005449; --seq-2:#007365; --seq-3:#008f84; --seq-4:#12ab9d; --seq-5:#4ec2b5;
+  --shadow:0 1px 2px rgba(16,24,23,.05), 0 8px 24px -16px rgba(16,24,23,.28);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    color-scheme: dark;
+    --bg:#0D1413; --surface:#141D1C; --surface-2:#1C2726; --surface-3:#243130;
+    --ink:#E7EFED; --ink-2:#A0B2AF; --ink-3:#748784;
+    --line:#253433; --line-strong:#334544;
+    --accent:#3DBDB0; --accent-ink:#7FD4C9; --accent-soft:#0F2B28;
+    --warn:#DFA063; --warn-soft:#2C2118;
+    --danger:#E08A80; --danger-soft:#2E1A18;
+    --good:#7CC28E;
+    --s1:#00a396; --s2:#d95926; --s3:#3987e5; --s4:#c98500; --s5:#d55181;
+    --s-idle:#31423F;
+    --seq-1:#b0e5dd; --seq-2:#7fd4c9; --seq-3:#3dbdb0; --seq-4:#00a396; --seq-5:#007e6f;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.7);
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme: dark;
+  --bg:#0D1413; --surface:#141D1C; --surface-2:#1C2726; --surface-3:#243130;
+  --ink:#E7EFED; --ink-2:#A0B2AF; --ink-3:#748784;
+  --line:#253433; --line-strong:#334544;
+  --accent:#3DBDB0; --accent-ink:#7FD4C9; --accent-soft:#0F2B28;
+  --warn:#DFA063; --warn-soft:#2C2118;
+  --danger:#E08A80; --danger-soft:#2E1A18;
+  --good:#7CC28E;
+  --s1:#00a396; --s2:#d95926; --s3:#3987e5; --s4:#c98500; --s5:#d55181;
+  --s-idle:#31423F;
+  --seq-1:#b0e5dd; --seq-2:#7fd4c9; --seq-3:#3dbdb0; --seq-4:#00a396; --seq-5:#007e6f;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.7);
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font-family:"Zen Kaku Gothic New","Hiragino Sans","Noto Sans JP",system-ui,sans-serif;
+  font-size:15px; line-height:1.85; letter-spacing:.01em;
+  -webkit-font-smoothing:antialiased;
+}
+a{color:var(--accent-ink); text-decoration-color:color-mix(in srgb,var(--accent) 40%,transparent); text-underline-offset:3px}
+a:hover{text-decoration-color:var(--accent)}
+:focus-visible{outline:2px solid var(--accent); outline-offset:3px; border-radius:3px}
+code,.mono{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,monospace; font-size:.88em; font-variant-numeric:tabular-nums}
+code{background:var(--surface-2); padding:.1em .38em; border-radius:4px; color:var(--ink-2)}
+
+/* ---------- shell ---------- */
+.wrap{max-width:1180px; margin:0 auto; padding:0 24px 96px}
+.masthead{padding:44px 0 28px; border-bottom:1px solid var(--line)}
+.eyebrow{
+  font-family:"IBM Plex Mono",monospace; font-size:11px; letter-spacing:.16em;
+  text-transform:uppercase; color:var(--ink-3); margin:0 0 14px
+}
+h1{
+  font-family:"Shippori Mincho B1","Hiragino Mincho ProN",serif; font-weight:600;
+  font-size:clamp(34px,5.4vw,54px); line-height:1.2; letter-spacing:.01em;
+  margin:0 0 12px; text-wrap:balance;
+}
+h1 .en{font-family:"IBM Plex Mono",monospace; font-weight:600; font-size:.62em; letter-spacing:-.01em; color:var(--accent-ink); display:block; margin-bottom:6px}
+.lede{font-size:17px; color:var(--ink-2); max-width:62ch; margin:0 0 22px; line-height:1.9}
+.byline{display:flex; flex-wrap:wrap; gap:8px 20px; font-size:12.5px; color:var(--ink-3); font-family:"IBM Plex Mono",monospace}
+
+.cols{display:grid; grid-template-columns:214px minmax(0,1fr); gap:56px; align-items:start; margin-top:40px}
+@media (max-width:900px){ .cols{grid-template-columns:1fr; gap:28px} }
+
+/* ---------- side rail ---------- */
+.rail{position:sticky; top:24px}
+@media (max-width:900px){ .rail{position:static} }
+.rail h2{font-size:11px; font-family:"IBM Plex Mono",monospace; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-3); margin:0 0 12px; font-weight:600}
+.toc{list-style:none; margin:0 0 30px; padding:0; display:flex; flex-direction:column; gap:1px}
+.toc a{display:grid; grid-template-columns:26px 1fr; gap:8px; padding:6px 8px; border-radius:6px; text-decoration:none; color:var(--ink-2); font-size:13.5px; line-height:1.5}
+.toc a:hover{background:var(--surface-2); color:var(--ink)}
+.toc .n{font-family:"IBM Plex Mono",monospace; font-size:11px; color:var(--ink-3); padding-top:3px}
+@media (max-width:900px){
+  .toc{flex-direction:row; flex-wrap:wrap; gap:6px}
+  .toc a{grid-template-columns:auto auto; background:var(--surface); border:1px solid var(--line); padding:5px 10px}
+}
+.spec{border-top:1px solid var(--line); padding-top:14px; display:flex; flex-direction:column; gap:9px}
+.spec div{display:flex; justify-content:space-between; gap:10px; font-size:12px; line-height:1.5}
+.spec dt,.spec .k{color:var(--ink-3)}
+.spec .v{font-family:"IBM Plex Mono",monospace; font-weight:600; color:var(--ink); font-variant-numeric:tabular-nums; text-align:right}
+
+/* ---------- sections ---------- */
+section{margin:0 0 60px; scroll-margin-top:20px}
+.shead{display:flex; align-items:baseline; gap:12px; margin:0 0 6px; padding-bottom:10px; border-bottom:2px solid var(--ink)}
+.shead .n{font-family:"IBM Plex Mono",monospace; font-size:12px; font-weight:600; color:var(--accent-ink); letter-spacing:.04em}
+h2.st{font-family:"Shippori Mincho B1",serif; font-weight:600; font-size:25px; margin:0; letter-spacing:.02em; text-wrap:balance}
+.sdek{color:var(--ink-2); font-size:14.5px; margin:12px 0 24px; max-width:66ch}
+h3{font-size:16px; font-weight:700; margin:32px 0 10px; letter-spacing:.02em}
+p{margin:0 0 14px; max-width:66ch}
+.muted{color:var(--ink-2)}
+
+/* ---------- callout ---------- */
+.callout{border:1px solid var(--line); border-left:3px solid var(--accent); background:var(--surface); border-radius:0 10px 10px 0; padding:18px 20px; margin:0 0 16px; box-shadow:var(--shadow)}
+.callout.alert{border-left-color:var(--danger); background:var(--danger-soft); border-color:color-mix(in srgb,var(--danger) 22%,transparent)}
+.callout.caution{border-left-color:var(--warn); background:var(--warn-soft); border-color:color-mix(in srgb,var(--warn) 22%,transparent)}
+.callout .tag{font-family:"IBM Plex Mono",monospace; font-size:10.5px; letter-spacing:.12em; text-transform:uppercase; font-weight:600; display:block; margin-bottom:7px; color:var(--accent-ink)}
+.callout.alert .tag{color:var(--danger)} .callout.caution .tag{color:var(--warn)}
+.callout p:last-child{margin-bottom:0}
+.callout strong{font-weight:700}
+
+/* ---------- tables ---------- */
+.tw{overflow-x:auto; margin:0 0 18px; border:1px solid var(--line); border-radius:10px; background:var(--surface)}
+table{border-collapse:collapse; width:100%; font-size:13.5px; min-width:520px}
+th,td{text-align:left; padding:10px 14px; border-bottom:1px solid var(--line); vertical-align:top; line-height:1.65}
+thead th{background:var(--surface-2); font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--ink-3); font-weight:600; white-space:nowrap; border-bottom:1px solid var(--line-strong)}
+tbody tr:last-child td{border-bottom:none}
+td.num,th.num{text-align:right; font-family:"IBM Plex Mono",monospace; font-variant-numeric:tabular-nums; white-space:nowrap}
+td.id{font-family:"IBM Plex Mono",monospace; font-weight:600; color:var(--accent-ink); white-space:nowrap}
+tbody tr:hover{background:color-mix(in srgb,var(--accent) 4%,transparent)}
+
+/* ---------- figure ---------- */
+figure{margin:0 0 22px; background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:20px 18px 16px; box-shadow:var(--shadow)}
+figcaption{font-size:12.5px; color:var(--ink-3); margin-top:14px; padding-top:12px; border-top:1px solid var(--line); line-height:1.7}
+.fig-t{font-size:14px; font-weight:700; margin:0 0 2px}
+.fig-s{font-size:12.5px; color:var(--ink-3); margin:0 0 14px}
+svg{display:block; width:100%; height:auto; overflow:visible}
+.gl{stroke:var(--line); stroke-width:1}
+.ax{fill:var(--ink-3); font-size:11px; font-family:"IBM Plex Mono",monospace}
+.lbl{fill:var(--ink); font-size:12px; font-family:"Zen Kaku Gothic New",sans-serif}
+.val{fill:var(--ink); font-size:12px; font-weight:600; font-family:"IBM Plex Mono",monospace}
+.mul{fill:var(--accent-ink); font-size:11.5px; font-weight:600; font-family:"IBM Plex Mono",monospace}
+.inbar{fill:#fff; font-size:11px; font-weight:600; font-family:"IBM Plex Mono",monospace}
+.mark{fill:var(--ink-2); font-size:11px; font-family:"IBM Plex Mono",monospace}
+.markline{stroke:var(--ink-2); stroke-width:1; stroke-dasharray:3 3}
+.slo{stroke:var(--danger); stroke-width:1.5}
+.slot{fill:var(--danger); font-size:11px; font-weight:600; font-family:"IBM Plex Mono",monospace}
+
+.legend{display:flex; flex-wrap:wrap; gap:6px 18px; margin-top:14px; font-size:12.5px}
+.legend span{display:inline-flex; align-items:center; gap:7px; color:var(--ink-2)}
+.sw{width:11px; height:11px; border-radius:3px; flex:none}
+
+/* ---------- misc blocks ---------- */
+.grid2{display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:14px; margin:0 0 18px}
+.panel{background:var(--surface); border:1px solid var(--line); border-radius:10px; padding:16px 18px}
+.panel h4{margin:0 0 8px; font-size:13.5px; font-weight:700; display:flex; align-items:center; gap:8px}
+.panel p{font-size:13.5px; color:var(--ink-2); margin:0; line-height:1.75}
+.dot{width:7px; height:7px; border-radius:50%; flex:none}
+
+.stack{display:flex; flex-direction:column; gap:0; margin:0 0 20px; border:1px solid var(--line); border-radius:10px; overflow:hidden; background:var(--surface)}
+.step{display:grid; grid-template-columns:auto 1fr auto; gap:14px; align-items:center; padding:13px 18px; border-bottom:1px solid var(--line)}
+.step:last-child{border-bottom:none}
+.step .sn{font-family:"IBM Plex Mono",monospace; font-size:11px; color:var(--ink-3); font-weight:600}
+.step .sl{font-size:13.5px; line-height:1.6}
+.step .sl b{font-weight:700}
+.step .sv{font-family:"IBM Plex Mono",monospace; font-size:12.5px; font-weight:600; color:var(--accent-ink); font-variant-numeric:tabular-nums; white-space:nowrap}
+
+.pill{display:inline-block; font-family:"IBM Plex Mono",monospace; font-size:10.5px; font-weight:600; letter-spacing:.05em; padding:2px 8px; border-radius:99px; white-space:nowrap}
+.pill.ok{background:color-mix(in srgb,var(--good) 16%,transparent); color:var(--good)}
+.pill.no{background:var(--danger-soft); color:var(--danger)}
+.pill.hi{background:var(--danger-soft); color:var(--danger)}
+.pill.md{background:var(--warn-soft); color:var(--warn)}
+.pill.lo{background:var(--surface-2); color:var(--ink-3)}
+
+.docs{display:grid; grid-template-columns:repeat(auto-fit,minmax(232px,1fr)); gap:10px; margin-top:6px}
+.doc{display:block; background:var(--surface); border:1px solid var(--line); border-radius:10px; padding:14px 16px; text-decoration:none; transition:border-color .15s, transform .15s}
+.doc:hover{border-color:var(--accent); transform:translateY(-1px)}
+.doc .dn{font-family:"IBM Plex Mono",monospace; font-size:11px; color:var(--accent-ink); font-weight:600; display:block; margin-bottom:3px}
+.doc .dt{font-size:14px; font-weight:700; color:var(--ink); display:block; margin-bottom:4px}
+.doc .dd{font-size:12.5px; color:var(--ink-3); line-height:1.6; display:block}
+
+/* tooltip */
+#tt{position:fixed; z-index:50; pointer-events:none; background:var(--surface); color:var(--ink); border:1px solid var(--line-strong); border-radius:8px; padding:8px 11px; font-size:12.5px; line-height:1.6; box-shadow:var(--shadow); opacity:0; transition:opacity .1s; max-width:230px}
+#tt.on{opacity:1}
+#tt b{font-family:"IBM Plex Mono",monospace; font-variant-numeric:tabular-nums}
+.hit{cursor:default}
+@media (prefers-reduced-motion:reduce){ *{transition:none !important; animation:none !important} }
+</style>
+
+<div class="wrap">
+
+<header class="masthead">
+  <p class="eyebrow">設計書 / 2026-09-06 / 実装前レビュー用</p>
+  <h1><span class="en">PhotoSplat</span>単一写真から、スマホの中だけで軽量3DGSをつくる</h1>
+  <p class="lede">
+    写真を1枚選ぶと、ブラウザの中だけで3D Gaussian Splatting を組み立て、その場で回して見て、ファイルとして持ち帰れる。
+    写真は端末から一歩も出ない。配信は GitHub Actions から GitHub Pages へ、それだけ。
+  </p>
+  <div class="byline">
+    <span>ガウシアン 99,000</span><span>出力 201 KB</span><span>生成 7.6 秒</span><span>削減 320×</span><span>WebGPU 必須</span>
+  </div>
+</header>
+
+<div class="cols">
+
+<nav class="rail" aria-label="目次">
+  <h2>目次</h2>
+  <ul class="toc">
+    <li><a href="#corrections"><span class="n">00</span><span>前提の訂正</span></a></li>
+    <li><a href="#decisions"><span class="n">01</span><span>確定した決定</span></a></li>
+    <li><a href="#pipeline"><span class="n">02</span><span>生成パイプライン</span></a></li>
+    <li><a href="#budget"><span class="n">03</span><span>時間予算</span></a></li>
+    <li><a href="#compress"><span class="n">04</span><span>軽量化の4階層</span></a></li>
+    <li><a href="#bits"><span class="n">05</span><span>ビット割当</span></a></li>
+    <li><a href="#models"><span class="n">06</span><span>モデル選定</span></a></li>
+    <li><a href="#ci"><span class="n">07</span><span>CI / Pages</span></a></li>
+    <li><a href="#risks"><span class="n">08</span><span>リスクとPoC</span></a></li>
+    <li><a href="#index"><span class="n">09</span><span>設計書一覧</span></a></li>
+  </ul>
+  <div class="spec">
+    <div><span class="k">作業グリッド</span><span class="v">512²</span></div>
+    <div><span class="k">ガウシアン</span><span class="v">99,000</span></div>
+    <div><span class="k">1個あたり</span><span class="v">2.0 B</span></div>
+    <div><span class="k">出力 .pgs</span><span class="v">201 KB</span></div>
+    <div><span class="k">プレビュー</span><span class="v">4.65 s</span></div>
+    <div><span class="k">完了</span><span class="v">7.60 s</span></div>
+    <div><span class="k">SLO 上限</span><span class="v">10.0 s</span></div>
+    <div><span class="k">モデル計</span><span class="v">70 MB</span></div>
+  </div>
+</nav>
+
+<main>
+
+<!-- ============ 00 ============ -->
+<section id="corrections">
+  <div class="shead"><span class="n">00</span><h2 class="st">前提の訂正</h2></div>
+  <p class="sdek">設計に入る前に、いただいた前提のうち2点が事実と異なっていました。設計全体がこの2点の上に立っているため、最初に置きます。</p>
+
+  <div class="callout alert">
+    <span class="tag">訂正 1 — 参考文献の役割が入れ替わっています</span>
+    <p><strong>KISS-GS</strong>（Fraunhofer HHI, ECCV 2026, arXiv 2608.26948）は、単一画像からの生成手法ではなく <strong>3DGS の圧縮パイプライン</strong>です。属性を2D画像に並べ替えて画像コーデックに載せる SOG-XT により、vanilla 3DGS 比 85〜319× を達成しています。</p>
+    <p><strong>TripoSplat</strong>（VAST-AI, MIT）のほうが <strong>単一画像 → 3DGS の生成</strong>手法です。本設計では、軽量化の下敷きに KISS-GS を、品質の到達点の参照に TripoSplat を使います。</p>
+  </div>
+
+  <div class="callout alert">
+    <span class="tag">訂正 2 — TripoSplat はスマホブラウザでは動きません</span>
+    <p>HuggingFace の公式重みを実測したところ、fp16 で <strong>合計 4,461 MB</strong> ありました。内訳は DINOv3 ViT-H が 1,681 MB、拡散モデル 741 MB、VAE エンコーダ 682 MB、VAE デコーダ 576 MB、背景除去 445 MB、flux2-vae 336 MB。さらに20ステップの拡散サンプリングが要ります。</p>
+    <p>int4 まで量子化しても1GBを超え、iOS Safari がタブを落とすメモリ帯に入ります。GitHub Pages は静的配信のみでサーバ推論も置けません。<strong>オンデバイス完結（決定 D1）を守るなら、単眼深度推定を軸にした幾何ベースの再構成しか選択肢がありません。</strong></p>
+  </div>
+
+  <div class="callout caution">
+    <span class="tag">訂正 3 — Three.js の splat レンダラはまだリリースされていません</span>
+    <p>ご選択いただいた「Three.js ネイティブ WebGPU splat レンダラ (r186+)」は <code>dev</code> ブランチにマージ済みですが、npm 最新の <code>three@0.185.1</code> には splat モジュールが<strong>一切含まれていません</strong>（jsDelivr のファイル一覧で確認）。r186 のリリースを待つ形になります。</p>
+    <p>そのため描画層に薄い抽象インタフェースを1枚挟み、<strong>まず自前 WGSL 実装で進め、r186 が出たら差し替える</strong>設計にしています。</p>
+  </div>
+</section>
+
+<!-- ============ 01 ============ -->
+<section id="decisions">
+  <div class="shead"><span class="n">01</span><h2 class="st">確定した決定</h2></div>
+  <p class="sdek">ヒアリングで確定した14項目。以降の設計はすべてこれを前提にしています。</p>
+  <div class="tw"><table>
+    <thead><tr><th>ID</th><th>項目</th><th>決定</th><th>主な影響</th></tr></thead>
+    <tbody>
+      <tr><td class="id">D1</td><td>生成の実行場所</td><td><strong>完全オンデバイス</strong></td><td>使えるモデル規模の上限を決定づける</td></tr>
+      <tr><td class="id">D2</td><td>出力の立体性</td><td><strong>半球カバー</strong>（±60°、裏側は補完）</td><td>背面シェル生成が必須機能に</td></tr>
+      <tr><td class="id">D3</td><td>対象被写体</td><td>人物ポートレート／物体・商品単体</td><td>背景除去が必須。風景は非スコープ</td></tr>
+      <tr><td class="id">D4</td><td>軽量化の最優先KPI</td><td>スマホでの生成速度</td><td>アルゴリズム選定の第一基準</td></tr>
+      <tr><td class="id">D5</td><td>対応ブラウザ</td><td><strong>WebGPU 必須</strong></td><td>iOS 26+ Safari / Android Chrome 121+</td></tr>
+      <tr><td class="id">D6</td><td>ライセンス方針</td><td>未定・両方に備える</td><td>差し替え可能なモデルレジストリが必要</td></tr>
+      <tr><td class="id">D7</td><td>モデル配信</td><td>同一オリジン（Pages成果物に同梱）</td><td>git にはコミットしない。CORS 不要</td></tr>
+      <tr><td class="id">D8</td><td>保存・共有</td><td>ファイルダウンロードのみ</td><td>サーバ不要。URL共有・動画は非スコープ</td></tr>
+      <tr><td class="id">D9</td><td>レンダラ</td><td>Three.js ネイティブ WebGPU (r186+)</td><td>未リリースにつき緩衝レイヤ必須</td></tr>
+      <tr><td class="id">D10</td><td>CIの責務</td><td>ビルド＋デプロイ／量子化／テスト／バジェット</td><td>4ワークフロー構成</td></tr>
+      <tr><td class="id">D11</td><td>UI</td><td>日本語のみ、PWAなし</td><td>i18n・Service Worker は実装しない</td></tr>
+      <tr><td class="id">D12</td><td>入力手段</td><td>ファイル選択／D&amp;D・貼付／サンプル同梱</td><td>カメラプレビューは非スコープ</td></tr>
+      <tr><td class="id">D13</td><td>性能SLO</td><td>10秒以内。予算内で品質を最大化</td><td>時間予算表で管理</td></tr>
+      <tr><td class="id">D14</td><td>設計書形式</td><td>Markdown ＋ 閲覧用ページ</td><td>本ページと docs/ 配下8本</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="callout">
+    <span class="tag">D4 と D13 は矛盾しません</span>
+    <p>「速度が最優先」と「10秒でよいから高品質」を、次のように解釈して確定しました。<strong>10秒は超えてはならない上限であり、その予算内では品質に投資する。</strong>「速度が最優先」とは、品質のために10秒を12秒に延ばす判断を禁じる、という意味です。</p>
+    <p>したがって設計上のルールは2つ。①どの品質向上策も時間予算表に枠を確保できる場合のみ採用する。②予算を超えそうな処理は削るのではなく、<strong>プレビュー表示後のバックグラウンド処理に回す</strong>。ユーザーが待つ時間と、処理が終わる時間を分離します。</p>
+  </div>
+</section>
+
+<!-- ============ 02 ============ -->
+<section id="pipeline">
+  <div class="shead"><span class="n">02</span><h2 class="st">生成パイプライン</h2></div>
+  <p class="sdek">写真1枚から、画像平面に紐づいた3DGS表現を組み立てるまで。⑦の直後にプレビューを確定させ、以降の処理を待たずに操作を始められます。</p>
+
+  <div class="stack">
+    <div class="step"><span class="sn">⓪</span><span class="sl"><b>前処理</b> — EXIF回転補正、長辺1024pxへのリサイズ、正方化。焦点距離が無ければ水平画角55°を仮定</span><span class="sv">0.10 s</span></div>
+    <div class="step"><span class="sn">①</span><span class="sl"><b>被写体抽出</b> — 人物は MODNet、物体は ISNet-general。ガイデッドフィルタで境界を整え、小連結成分を除去</span><span class="sv">1.50 s</span></div>
+    <div class="step"><span class="sn">②</span><span class="sl"><b>深度推定</b> — Depth Anything V2 Small。全体パスに加え、被写体を2×2タイルに分けた高解像パスで細部を上げ、最小二乗で合わせ込む</span><span class="sv">2.40 s</span></div>
+    <div class="step"><span class="sn">③</span><span class="sl"><b>深度較正</b> — 相対逆深度をメトリック化。「奥行き ≈ 短辺の0.65倍」を仮定して尺度を決める（UIの「立体感」スライダで可変）</span><span class="sv">0.25 s</span></div>
+    <div class="step"><span class="sn">④⑤⑥</span><span class="sl"><b>シェル構築</b> — 前面を逆投影、シルエットの距離変換から楕円断面の厚みを推定して背面シェルを閉じ、深度不連続の縁にスカートを張る</span><span class="sv">0.30 s</span></div>
+    <div class="step"><span class="sn">⑦</span><span class="sl"><b>適応サンプリング</b> — 四分木で分散の小さいセルを統合。ここで<strong>プレビューを確定</strong></span><span class="sv">0.10 s</span></div>
+    <div class="step"><span class="sn">⑧</span><span class="sl"><b>微調整</b> — 入力画像を教師に、量子化を織り込んで（STE）色・不透明度・スケールを400反復最適化</span><span class="sv">2.40 s</span></div>
+    <div class="step"><span class="sn">⑨</span><span class="sl"><b>量子化・符号化</b> — 属性を4枚の画像プレーンにパックし、PNG / WebP で符号化</span><span class="sv">0.55 s</span></div>
+  </div>
+
+  <div class="callout">
+    <span class="tag">半球カバー（D2）をどう成立させるか</span>
+    <p>前面シェルだけでは、横に回した瞬間に紙のような板に見えます。そこでシルエットの内部距離変換 <code>D(u,v)</code> から <strong>楕円断面の厚み</strong> <code>t = T·√(1−(1−D/Dmax)²)</code> を与え、閉じた殻を作ります。境界で厚み0、中心で最大になるため、円柱状にした場合の角張った縁が出ません。</p>
+    <p>背面の色は<strong>前面色の水平反転＋厚みに応じた減光</strong>。人物の後頭部や物体の裏面として違和感が少なく、コストは 0.02 秒です。インペイントモデルを足せば最良ですが +2秒 +50MB で予算を壊すため採りません。背面は正面から見えないので、<strong>2×2画素を1ガウシアンにまとめた 1/4 密度</strong>で足ります。</p>
+  </div>
+</section>
+
+<!-- ============ 03 ============ -->
+<section id="budget">
+  <div class="shead"><span class="n">03</span><h2 class="st">時間予算</h2></div>
+  <p class="sdek">基準端末は iPhone 14 / Pixel 7 相当、モデルはキャッシュ済み。物体モード（重いほうの ISNet 1024²）での見積もりです。</p>
+
+  <figure>
+    <p class="fig-t">生成 10 秒予算の内訳</p>
+    <p class="fig-s">段階別の所要時間（秒）／ 基準端末・物体モード・標準プリセット</p>
+    <svg viewBox="0 0 820 168" role="img" aria-label="生成処理の時間予算。前処理と被写体抽出1.6秒、深度推定2.4秒、幾何構築0.65秒、ここまでの4.65秒でプレビュー表示。微調整2.4秒、量子化0.55秒で7.6秒に完了。SLO上限10秒に対し2.4秒の余裕。">
+      <!-- grid -->
+      <g class="gl">
+        <line x1="96" y1="46" x2="96" y2="118"/><line x1="232" y1="46" x2="232" y2="118"/>
+        <line x1="368" y1="46" x2="368" y2="118"/><line x1="504" y1="46" x2="504" y2="118"/>
+        <line x1="640" y1="46" x2="640" y2="118"/>
+      </g>
+      <!-- markers above -->
+      <line class="markline" x1="412.2" y1="30" x2="412.2" y2="112"/>
+      <line class="markline" x1="612.8" y1="30" x2="612.8" y2="112"/>
+      <line class="slo" x1="776" y1="30" x2="776" y2="118"/>
+      <text class="mark" x="412.2" y="24" text-anchor="middle">プレビュー 4.65s</text>
+      <text class="mark" x="612.8" y="24" text-anchor="middle">完了 7.60s</text>
+      <text class="slot" x="776" y="24" text-anchor="end">SLO 10.0s</text>
+      <!-- segments (2px surface gap between fills) -->
+      <g>
+        <rect class="hit" x="96"    y="54" width="106.8" height="46" rx="4" fill="var(--s1)" data-t="前処理・被写体抽出" data-v="1.60 秒"/>
+        <rect class="hit" x="204.8" y="54" width="161.2" height="46" rx="4" fill="var(--s2)" data-t="深度推定（全体＋タイル）" data-v="2.40 秒"/>
+        <rect class="hit" x="368"   y="54" width="42.2"  height="46" rx="4" fill="var(--s3)" data-t="幾何構築（較正・シェル・サンプリング）" data-v="0.65 秒"/>
+        <rect class="hit" x="412.2" y="54" width="161.2" height="46" rx="4" fill="var(--s4)" data-t="微調整（QAT 400反復）" data-v="2.40 秒"/>
+        <rect class="hit" x="575.4" y="54" width="35.4"  height="46" rx="4" fill="var(--s5)" data-t="量子化・画像符号化" data-v="0.55 秒"/>
+        <rect class="hit" x="612.8" y="54" width="161.2" height="46" rx="4" fill="var(--s-idle)" data-t="余裕（端末差の吸収）" data-v="2.40 秒"/>
+      </g>
+      <text class="inbar" x="149.4" y="82" text-anchor="middle">1.6</text>
+      <text class="inbar" x="285.4" y="82" text-anchor="middle">2.4</text>
+      <text class="inbar" x="492.8" y="82" text-anchor="middle">2.4</text>
+      <text class="mark"  x="693.4" y="82" text-anchor="middle">2.4</text>
+      <!-- axis -->
+      <line class="gl" x1="96" y1="118" x2="776" y2="118"/>
+      <g class="ax" text-anchor="middle">
+        <text x="96"  y="134">0</text><text x="232" y="134">2</text><text x="368" y="134">4</text>
+        <text x="504" y="134">6</text><text x="640" y="134">8</text><text x="776" y="134">10</text>
+      </g>
+      <text class="ax" x="96" y="152" text-anchor="start">経過時間（秒）</text>
+    </svg>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--s1)"></i>前処理・被写体抽出</span>
+      <span><i class="sw" style="background:var(--s2)"></i>深度推定</span>
+      <span><i class="sw" style="background:var(--s3)"></i>幾何構築</span>
+      <span><i class="sw" style="background:var(--s4)"></i>微調整（QAT）</span>
+      <span><i class="sw" style="background:var(--s5)"></i>量子化・符号化</span>
+      <span><i class="sw" style="background:var(--s-idle)"></i>余裕</span>
+    </div>
+    <figcaption>余裕 2.4 秒は、端末差と「被写体が画面いっぱいに写っている場合」のガウシアン数増加を吸収するための枠です。予算が逼迫した場合、深度タイルパス（1.6秒）と微調整（2.4秒）はプレビュー後のバックグラウンド処理に回せます。初回訪問時はこれに加え、モデルのダウンロード（人物モード 25.6 MB、物体モード 63.1 MB）と初期化がかかります。</figcaption>
+  </figure>
+
+  <div class="tw"><table>
+    <thead><tr><th>段階</th><th class="num">所要</th><th class="num">累積</th><th>予算超過時</th></tr></thead>
+    <tbody>
+      <tr><td>⓪ 前処理</td><td class="num">0.10</td><td class="num">0.10</td><td class="muted">—</td></tr>
+      <tr><td>① 被写体抽出（ISNet 1024²）</td><td class="num">1.50</td><td class="num">1.60</td><td>人物モードなら 0.35 s</td></tr>
+      <tr><td>② 深度・全体パス</td><td class="num">0.80</td><td class="num">2.40</td><td class="muted">—</td></tr>
+      <tr><td>② 深度・タイルパス 2×2</td><td class="num">1.60</td><td class="num">4.00</td><td><strong>背景処理へ回す</strong></td></tr>
+      <tr><td>③ 較正・法線・厚み推定</td><td class="num">0.25</td><td class="num">4.25</td><td class="muted">—</td></tr>
+      <tr><td>④⑤⑥ シェル・スカート</td><td class="num">0.30</td><td class="num">4.55</td><td class="muted">—</td></tr>
+      <tr><td>⑦ 適応サンプリング</td><td class="num">0.10</td><td class="num">4.65</td><td class="muted">—</td></tr>
+      <tr><td><strong>▶ プレビュー表示・操作可能</strong></td><td class="num"></td><td class="num"><strong>4.65</strong></td><td class="muted">—</td></tr>
+      <tr><td>⑧ 微調整 400反復</td><td class="num">2.40</td><td class="num">7.05</td><td>反復数を200に</td></tr>
+      <tr><td>⑨ 量子化・符号化</td><td class="num">0.55</td><td class="num">7.60</td><td>書き出し時まで遅延</td></tr>
+      <tr><td><strong>▶ 全処理完了</strong></td><td class="num"></td><td class="num"><strong>7.60</strong></td><td><span class="pill md">上限 10.0</span></td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<!-- ============ 04 ============ -->
+<section id="compress">
+  <div class="shead"><span class="n">04</span><h2 class="st">軽量化の4階層</h2></div>
+  <p class="sdek">「量子化などの軽量化技術を深く」というご要望への回答。独立した4階層が乗算的に効きます。KISS-GS が報告する 85〜319× と同オーダーに達しますが、その理由は技術力ではなく、単一画像由来という<strong>構造的な有利さ</strong>です。</p>
+
+  <figure>
+    <p class="fig-t">4階層を通したデータ量の推移</p>
+    <p class="fig-s">ガウシアン 99,000 個相当のシーンサイズ／対数目盛</p>
+    <svg viewBox="0 0 820 292" role="img" aria-label="軽量化4階層のデータ量推移。ベースライン65.0MBから、L0表現の削減で12.6MB、L1個数の削減で4.76MB、L2数値精度の削減で1.15MB、L3画像化と符号化で0.20MB。総合320倍。">
+      <g class="gl">
+        <line x1="168" y1="30" x2="168" y2="256"/><line x1="361.3" y1="30" x2="361.3" y2="256"/>
+        <line x1="554.7" y1="30" x2="554.7" y2="256"/><line x1="748" y1="30" x2="748" y2="256"/>
+      </g>
+      <!-- rows -->
+      <g>
+        <text class="lbl" x="156" y="52" text-anchor="end">ベースライン</text>
+        <rect class="hit" x="168" y="36" width="543.8" height="24" rx="4" fill="var(--seq-1)" data-t="ベースライン" data-v="65.0 MB — vanilla 3DGS PLY (SH次数3), 262,144 個"/>
+        <text class="val" x="721.8" y="52">65.0 MB</text>
+
+        <text class="lbl" x="156" y="96" text-anchor="end">L0 表現の削減</text>
+        <rect class="hit" x="168" y="80" width="405.9" height="24" rx="4" fill="var(--seq-2)" data-t="L0 表現の削減" data-v="12.6 MB — SH高次・未使用法線・回転を捨てて 248 B → 48 B/個"/>
+        <text class="val" x="583.9" y="96">12.6 MB</text><text class="mul" x="647" y="96">5.2×</text>
+
+        <text class="lbl" x="156" y="140" text-anchor="end">L1 個数の削減</text>
+        <rect class="hit" x="168" y="124" width="324.3" height="24" rx="4" fill="var(--seq-3)" data-t="L1 個数の削減" data-v="4.76 MB — 背景除去と適応サンプリングで 262,144 → 99,000 個"/>
+        <text class="val" x="502.3" y="140">4.76 MB</text><text class="mul" x="562" y="140">2.6×</text>
+
+        <text class="lbl" x="156" y="184" text-anchor="end">L2 数値精度の削減</text>
+        <rect class="hit" x="168" y="168" width="205.1" height="24" rx="4" fill="var(--seq-4)" data-t="L2 数値精度の削減" data-v="1.15 MB — 属性ごとのビット割当で 48 B → 11.6 B/個"/>
+        <text class="val" x="383.1" y="184">1.15 MB</text><text class="mul" x="443" y="184">4.1×</text>
+
+        <text class="lbl" x="156" y="228" text-anchor="end">L3 画像化と符号化</text>
+        <rect class="hit" x="168" y="212" width="58.6" height="24" rx="4" fill="var(--seq-5)" data-t="L3 画像化と符号化" data-v="0.20 MB — 4枚の画像プレーンを PNG / WebP に。1個あたり 2.0 バイト"/>
+        <text class="val" x="236.6" y="228">0.20 MB</text><text class="mul" x="300" y="228">5.8×</text>
+      </g>
+      <line class="gl" x1="168" y1="256" x2="748" y2="256"/>
+      <g class="ax" text-anchor="middle">
+        <text x="168" y="272">0.1</text><text x="361.3" y="272">1</text>
+        <text x="554.7" y="272">10</text><text x="748" y="272">100</text>
+      </g>
+      <text class="ax" x="168" y="288" text-anchor="start">シーンサイズ MB（対数目盛）</text>
+      <text class="mul" x="748" y="288" text-anchor="end">総合 320×</text>
+    </svg>
+    <figcaption>ベースラインは INRIA 標準の 3DGS PLY（SH次数3、248 バイト／個）を 262,144 個持った場合。L3 まで通すと <strong>ガウシアン1個あたり実効 2.0 バイト</strong>になります。棒は対数目盛なので、見た目の長さの差以上に実際の差は大きい点にご注意ください。</figcaption>
+  </figure>
+
+  <div class="grid2">
+    <div class="panel">
+      <h4><i class="dot" style="background:var(--seq-1)"></i>L0 — 表現の削減 <span class="pill ok">画質損失ゼロ</span></h4>
+      <p>SH 1〜3次（180 B）を捨てて次数0に固定。<strong>単一画像からは視点依存の色を観測できない</strong>ので、持たせても無根拠な外挿にしかなりません。標準PLYの未使用法線フィールド（12 B、常に0）も捨て、全ガウシアンをサーフェル化して回転クォータニオンを法線に、スケールを3軸から2軸に。248 B → 48 B。</p>
+    </div>
+    <div class="panel">
+      <h4><i class="dot" style="background:var(--seq-2)"></i>L1 — 個数の削減</h4>
+      <p>被写体単体を対象とする要件から、背景除去だけで画面の60%が消えます（2.5×）。さらに四分木で分散の小さいセルを統合し40%削減。<strong>重要度プルーニングは既定でほぼ行いません</strong> — 個別に間引くと画像平面に穴が開き、L3 の圧縮効率を落として差し引きゼロになるためです。</p>
+    </div>
+    <div class="panel">
+      <h4><i class="dot" style="background:var(--seq-3)"></i>L2 — 数値精度の削減</h4>
+      <p>属性ごとのビット割当。基準は「その属性の誤差が最終画像に何ピクセル分の誤差として現れるか」で、全属性を1画面ピクセル以下に揃えます。ある属性だけ精度を上げても他がボトルネックになり、サイズだけが増えるためです。48 B → 11.6 B。</p>
+    </div>
+    <div class="panel">
+      <h4><i class="dot" style="background:var(--seq-4)"></i>L3 — 画像化と符号化</h4>
+      <p>KISS-GS の SOG-XT と同じ発想で、属性を2D画像に並べて PNG / WebP に載せます。ただし本設計では<strong>並べ替え工程が丸ごと不要</strong>（下の囲み）。さらに位置・法線・スケール・厚み・背面色・スカートは<strong>保存すらしません</strong>。</p>
+    </div>
+  </div>
+
+  <div class="callout">
+    <span class="tag">核心 — なぜ本設計では「並べ替え」が要らないのか</span>
+    <p>一般の3DGSでは、ガウシアンは3D空間に散らばった順不同の集合です。これを「隣接ピクセルの値が似る」ように2Dグリッドへ並べ替えるのが、画像コーデックを効かせるための前提であり、圧縮全体で最も重い工程になります。KISS-GS / SOG は PLAS（Parallel Linear Assignment Sorting）を使い、数十万プリミティブに GPU で数秒〜数十秒かけます。</p>
+    <p><strong>深度マップから生成されたガウシアンは、元から画像のピクセル格子に1対1で乗っています。</strong>ピクセル <code>(u,v)</code> から作ったガウシアンをそのまま <code>(u,v)</code> に置けばよく、その並び順の空間的コヒーレンスは<strong>入力写真そのものが持つコヒーレンス</strong>です。並べ替えアルゴリズムが探しにいく理想解に、定義上そのまま一致しています。</p>
+    <p>単一画像・深度ベースであることから来る構造的な優位で、決定 D4（生成速度が最優先）に直接効きます。数秒の工程がゼロになります。</p>
+  </div>
+
+  <h3>保存しないもの</h3>
+  <p>画像平面に乗ったことで、多くの属性が「決定的な導出物」になります。</p>
+  <div class="tw"><table>
+    <thead><tr><th>属性</th><th>保存</th><th>復元方法</th></tr></thead>
+    <tbody>
+      <tr><td>位置</td><td><span class="pill no">不要</span></td><td>ピクセル座標 + 深度 + カメラ内部パラメータから逆投影。3成分12Bが<strong>深度1成分に縮む</strong></td></tr>
+      <tr><td>法線</td><td><span class="pill no">不要</span></td><td>深度マップの局所平面フィットから導出</td></tr>
+      <tr><td>スケール（基準）</td><td><span class="pill no">不要</span></td><td><code>s = k·z/focalPx</code> で深度から決まる</td></tr>
+      <tr><td>厚み（背面）</td><td><span class="pill no">不要</span></td><td>α からの距離変換で決定的に求まる。パラメータ <code>T</code> のみ保存</td></tr>
+      <tr><td>背面の色</td><td><span class="pill no">不要</span></td><td>前面色の水平反転＋減光</td></tr>
+      <tr><td>スカート全体</td><td><span class="pill no">不要</span></td><td>深度エッジ検出は <code>frontDepth</code> と <code>alpha</code> の決定的な関数</td></tr>
+      <tr><td>深度・色・不透明度・スケール補正</td><td><span class="pill ok">保存</span></td><td>4枚の画像プレーンとして PNG / WebP に</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="callout">
+    <span class="tag">背面シェルとスカートを保存しなくてよい、もう一つの理由</span>
+    <p>微調整の損失は「入力画像のカメラ位置から描画した結果」と入力画像の差で定義されます。そのカメラから見て、<strong>背面シェルとスカートは前面シェルに完全に遮蔽されています</strong>。したがって勾配が届かず、最適化されません。ならば保存する必要もない。</p>
+    <p>これは偶然ではなく、「単一視点の情報しか無いのだから、見えないものは最適化できないし、決定的な規則で作るしかない」という一貫性の表れです。</p>
+  </div>
+</section>
+
+<!-- ============ 05 ============ -->
+<section id="bits">
+  <div class="shead"><span class="n">05</span><h2 class="st">ビット割当</h2></div>
+  <p class="sdek">L2 の中身。被写体を原点中心の単位立方体に正規化し、実サイズ 1m と仮定して精度を評価しています。</p>
+  <div class="tw"><table>
+    <thead><tr><th>属性</th><th class="num">元</th><th>量子化方式</th><th class="num">bit</th><th>精度と根拠</th></tr></thead>
+    <tbody>
+      <tr><td><strong>位置</strong> x,y,z</td><td class="num">96</td><td>一様量子化</td><td class="num">33</td><td><strong>0.49 mm</strong>。512px で 1m を見るとき 1px ≈ 2.0mm なので、量子化幅はその 1/4。拡大しても段差が見えない</td></tr>
+      <tr><td><strong>法線</strong></td><td class="num">96</td><td>八面体写像</td><td class="num">16</td><td><strong>角度誤差 &lt; 0.9°</strong>。単位球面を2Dに写す最も歪みの少ない写像。8bit×2 で球面をほぼ均一に 65,536 分割</td></tr>
+      <tr><td><strong>スケール</strong> 2軸</td><td class="num">64</td><td>対数量子化</td><td class="num">16</td><td><strong>相対誤差 &lt; 0.55%</strong>。スケールは対数正規分布に従うため、log空間の一様量子化で相対誤差が一定になる。線形量子化では小さいサーフェルの精度が壊滅する</td></tr>
+      <tr><td><strong>不透明度</strong></td><td class="num">32</td><td>logit空間で一様</td><td class="num">8</td><td>素の α を量子化すると 0 付近と 1 付近が粗くなる。<code>logit(α)</code> を量子化すればブレンドの視覚差が均一になる</td></tr>
+      <tr><td><strong>色</strong> (SH DC)</td><td class="num">96</td><td>YCoCg 非対称</td><td class="num">20</td><td>Y=8, Co=6, Cg=6。視覚は輝度より色差の感度が低い。YCoCg は RGB からの変換が加減算とシフトのみで、GPU上で無損失かつ高速</td></tr>
+      <tr style="background:var(--surface-2)"><td><strong>計</strong></td><td class="num"><strong>384</strong></td><td></td><td class="num"><strong>93</strong></td><td><strong>4.1× — 48 B → 11.6 B/個</strong></td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>採用しなかった手法と、その理由</h3>
+  <div class="tw"><table>
+    <thead><tr><th>手法</th><th>不採用の理由</th></tr></thead>
+    <tbody>
+      <tr><td><strong>ベクトル量子化（コードブック）</strong><br><span class="muted" style="font-size:12.5px">KISS-GS の自己組織化2Dコードブックの発想</span></td><td>①コードブック学習に1〜2秒かかり10秒予算を圧迫する ②本設計の属性は既に空間的に強く相関しているため、後段の画像コーデックが同等の冗長性除去をコストゼロで行う ③デコード時のインデックス参照が GPU での直接展開を複雑にする。<strong>冗長性を2回取りに行っても、2回目はほとんど残っていない</strong></td></tr>
+      <tr><td><strong>位置の差分符号化</strong><br><span class="muted" style="font-size:12.5px">Morton順 + varint</span></td><td>L3 で位置を保存しなくなるため無意味。素の配列形式（<code>.spz</code> 書き出し時）でのみ有効なので、そちらで使う</td></tr>
+      <tr><td><strong>SH 1次だけ残す</strong></td><td>単一画像に視点依存の情報は存在しない。持たせても幻覚にしかならない</td></tr>
+      <tr><td><strong>混合精度</strong><br><span class="muted" style="font-size:12.5px">重要ガウシアンだけ高精度に</span></td><td>可変長になり、固定ビット深度が前提の画像プレーン格納と両立しない</td></tr>
+      <tr><td><strong>画像コーデックを微調整ループに織り込む</strong><br><span class="muted" style="font-size:12.5px">KISS-GS の codec-in-the-loop</span></td><td>WebP エンコード/デコードは微分不可能で、1反復あたり30ms以上。400反復で +12秒となり予算を完全に破壊する。<strong>スカラー量子化のループ内織り込み（STE）だけを採用</strong>し、実エンコードは最終後に1回だけ行って PSNR を測り、38 dB を割ったら q を上げる</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>深度プレーンの扱い — 非自明だが効く一手</h3>
+  <div class="callout">
+    <span class="tag">12bit に落として、上位8bit と 下位4bit に分離する</span>
+    <p><strong>16bit のまま保存してはいけません。</strong>深度の実効的な有効精度は12bit程度なので、16bit で持つと下位4bitは実質ノイズになり、PNG の予測フィルタ後の残差がランダム化して圧縮率が壊滅します。精度が要らないビットを持つことは、単に無駄なのではなく<strong>有害</strong>です。</p>
+    <p><strong>上位/下位に分離する理由。</strong>PNG のフィルタはバイト単位で動きます。16bit グレースケールを1枚で持つと、滑らかな上位バイトと不規則な下位バイトが交互に並び、どちらの予測も当たりません。分離すれば上位プレーンは非常に滑らかで高圧縮、下位プレーンは4bit分のエントロピーしか持ちません。<strong>この2点だけで、深度プレーンのサイズが素朴な実装の約 1/3 になります。</strong></p>
+  </div>
+
+  <h3>出力形式ごとのサイズ</h3>
+  <div class="tw"><table>
+    <thead><tr><th>形式</th><th class="num">サイズ</th><th class="num">対 .pgs</th><th>用途</th></tr></thead>
+    <tbody>
+      <tr><td>vanilla 3DGS PLY（SH次数3）</td><td class="num">24.6 MB</td><td class="num">122×</td><td class="muted">比較用の基準</td></tr>
+      <tr><td><code>.ply</code>（SH次数0）</td><td class="num">6.7 MB</td><td class="num">33×</td><td>最大互換。Blender・研究ツール。<strong>未使用の法線フィールドに実際の法線を書き込む</strong></td></tr>
+      <tr><td><code>.spz</code>（Niantic）</td><td class="num">1.4 MB</td><td class="num">7.0×</td><td><strong>既定の書き出し。</strong>SuperSplat / PlayCanvas / Spark で開ける</td></tr>
+      <tr style="background:var(--accent-soft)"><td><code>.pgs</code>（本設計）</td><td class="num"><strong>201 KB</strong></td><td class="num">1.0×</td><td>本アプリでの再読込。4枚の画像プレーン＋JSONマニフェスト</td></tr>
+    </tbody>
+  </table></div>
+  <p class="muted" style="font-size:13.5px"><code>.spz</code> の 1/7 という差は、<code>.spz</code> が汎用形式として「順不同のガウシアン集合」を前提に設計されている以上、公平な比較ではありません。単一画像という制約を活かして得た構造的な利得です。だからこそ互換形式の書き出しも必ず提供します。</p>
+</section>
+
+<!-- ============ 06 ============ -->
+<section id="models">
+  <div class="shead"><span class="n">06</span><h2 class="st">モデル選定</h2></div>
+  <p class="sdek">ライセンス方針が未定（D6）のため、<code>models/registry.json</code> でプロファイル切り替え可能にします。既定は商用可のみ。実サイズはすべて HuggingFace API で実測した値です。</p>
+  <div class="tw"><table>
+    <thead><tr><th>用途</th><th>モデル</th><th>ライセンス</th><th class="num">元</th><th class="num">量子化後</th><th>備考</th></tr></thead>
+    <tbody>
+      <tr><td>深度推定</td><td>Depth Anything V2 Small</td><td><span class="pill ok">Apache-2.0</span></td><td class="num">99.1 MB</td><td class="num"><strong>19.1 MB</strong><br><span class="muted">q4f16</span></td><td>唯一の必須モデル。V2 の Base / Large は CC-BY-NC のため使用不可</td></tr>
+      <tr><td>人物マット</td><td>MODNet (Xenova)</td><td><span class="pill ok">Apache-2.0</span></td><td class="num">25.9 MB</td><td class="num"><strong>6.6 MB</strong><br><span class="muted">uint8</span></td><td>人物特化。軽くて速い（0.35 s）</td></tr>
+      <tr><td>汎用マット</td><td>ISNet-general (img.ly)</td><td><span class="pill ok">MIT</span></td><td class="num">176.1 MB</td><td class="num"><strong>約 44 MB</strong><br><span class="muted">uint8</span></td><td>物体全般。<strong>量子化版が未公開なのでCIで自前生成</strong></td></tr>
+      <tr><td>汎用マット（代替）</td><td>RMBG-1.4</td><td><span class="pill no">非商用</span></td><td class="num">176.2 MB</td><td class="num">44.4 MB</td><td>精度は高いが商用不可。<code>research</code> プロファイル専用</td></tr>
+      <tr><td>汎用マット（不採用）</td><td>BiRefNet-ONNX</td><td><span class="pill ok">MIT</span></td><td class="num">972.7 MB</td><td class="num">489.7 MB<br><span class="muted">fp16でも</span></td><td>モバイルには大きすぎる</td></tr>
+    </tbody>
+  </table></div>
+  <p class="muted" style="font-size:13.5px">初回必須は <strong>25.6 MB</strong>（深度＋人物マット）。物体モードを選んだときだけ +44 MB を遅延ロードします。UIには「初回のみ約44MBの追加ダウンロード」と明示します。</p>
+</section>
+
+<!-- ============ 07 ============ -->
+<section id="ci">
+  <div class="shead"><span class="n">07</span><h2 class="st">CI / Pages</h2></div>
+  <p class="sdek">D10 の4責務すべてを GitHub Actions だけで実装します。外部サービスには依存しません。</p>
+
+  <div class="stack">
+    <div class="step"><span class="sn">1</span><span class="sl"><b>deploy.yml</b> — モデル取得（キャッシュ）→ 量子化 → ビルド → バジェット判定 → Pages デプロイ。<code>main</code> への push で起動</span><span class="sv">約 3 分</span></div>
+    <div class="step"><span class="sn">2</span><span class="sl"><b>quantize.yml</b> — 量子化設定が変わったPRで、base側とhead側の両方を量子化して<strong>精度差分をPRにコメント</strong></span><span class="sv">約 12 分</span></div>
+    <div class="step"><span class="sn">3</span><span class="sl"><b>test.yml</b> — 単体・結合に加え、Playwright + headless Chrome（SwiftShader）でサンプル画像から実際に生成して検証</span><span class="sv">約 4 分</span></div>
+    <div class="step"><span class="sn">4</span><span class="sl"><b>budget.yml</b> — バンドル・モデル・出力サイズ・再構成品質のバジェット判定。warn はコメント、fail はCIを落とす</span><span class="sv">約 3 分</span></div>
+  </div>
+
+  <div class="callout">
+    <span class="tag">モデル量子化をCIでやることの、本当の価値</span>
+    <p>キャッシュキーを「レジストリ＋量子化スクリプト＋較正データ」のハッシュにするので、通常のデプロイでは再量子化は走らず数十秒で終わります。フル実行されるのは量子化設定を変えたPRだけです。</p>
+    <p>価値の中心は <code>excludeOpTypes</code> — <strong>どの演算を量子化から除外すると精度が保てるかは、事前には分からず試して測るしかありません。</strong>深度推定では LayerNorm と Softmax の精度が支配的で、ここを量子化すると相対絶対誤差が跳ね上がります。CIに載っていれば「除外リストを1行変えたPR」に対して自動で精度差分が出るので、数値を見ながら詰められます。手元の手作業では、この探索は現実的に回りません。</p>
+    <p>較正は人物6枚・物体6枚の計12枚。深度は <strong>AbsRel &lt; 2.0%</strong> と <strong>δ&lt;1.05 精度 &gt; 97%</strong> の両方を見ます。AbsRel だけだと、顔の中央だけがへこむような局所的な破綻を見逃すためです。</p>
+  </div>
+
+  <div class="callout caution">
+    <span class="tag">正直に線を引きます — 時間はCIで測れません</span>
+    <p>GitHubランナーにはGPUがなく、Chrome は SwiftShader（ソフトウェア実装）で動きます。実機の20〜50倍遅いので、<strong>そこで測った「生成時間」は実機の性能について何も語りません。</strong></p>
+    <p>したがって <strong>CIが強制するのはサイズと品質の静的指標のみ</strong>です。バンドル・モデル・出力サイズ、ガウシアン数、入力視点でのSSIM、±40°回転時の穴の割合、量子化前後の精度差。時間は実機で <code>?bench=1</code> モードを使って手動計測し、<code>docs/measurements.md</code> に端末名と日付つきで記録します。</p>
+    <p>「CIが通ったから速い」と誤認するより、測れないことを明示しておくほうが安全だと判断しました。</p>
+  </div>
+
+  <h3>GitHub Pages 固有の制約</h3>
+  <div class="tw"><table>
+    <thead><tr><th>制約</th><th class="num">値</th><th>本設計での状況</th></tr></thead>
+    <tbody>
+      <tr><td>公開サイトの最大サイズ</td><td class="num">1 GB</td><td>約 100 MB。余裕あり</td></tr>
+      <tr><td>リポジトリ推奨サイズ</td><td class="num">1 GB</td><td>モデルをコミットしないため約 20 MB</td></tr>
+      <tr><td>帯域</td><td class="num">100 GB/月</td><td><strong>最も現実的なリスク。</strong>モデル70MBを毎回配信すると月1,400訪問で上限。Cache API と遅延ロードで初回25.6MBに抑え、約3,900訪問まで伸ばす</td></tr>
+      <tr><td>ビルド回数</td><td class="num">10回/時</td><td><strong>カスタムworkflowには適用されない</strong>（Jekyll 自動ビルドのみ）</td></tr>
+      <tr><td>デプロイのタイムアウト</td><td class="num">10 分</td><td>ビルド3分。余裕あり</td></tr>
+      <tr><td>カスタムHTTPヘッダ</td><td class="num">設定不可</td><td><strong>COOP/COEP を返せない → SharedArrayBuffer 不可 → WASM はシングルスレッド。これが D5「WebGPU必須」の技術的根拠です。</strong></td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<!-- ============ 08 ============ -->
+<section id="risks">
+  <div class="shead"><span class="n">08</span><h2 class="st">リスクとPoC</h2></div>
+  <p class="sdek">本実装に入る前に、合計4〜6日のPoCで前提を検証します。順序には理由があります。</p>
+
+  <div class="tw"><table>
+    <thead><tr><th>ID</th><th>リスク</th><th>影響</th><th>確率</th><th>対策</th></tr></thead>
+    <tbody>
+      <tr><td class="id">R1</td><td>ONNX Runtime Web の WebGPU EP が iOS Safari で動かない</td><td><span class="pill hi">致命的</span></td><td><span class="pill md">中</span></td><td>3段の縮退（q4f16 → fp16 → WASM uint8）。<strong>PoC-1 で最優先検証</strong></td></tr>
+      <tr><td class="id">R2</td><td>q4f16 量子化で深度が破綻する</td><td><span class="pill md">大</span></td><td><span class="pill md">中</span></td><td>LayerNorm/Softmax を除外、DPTヘッドは量子化しない、最終手段は fp16</td></tr>
+      <tr><td class="id">R3</td><td>背面シェルの見た目が許容できない</td><td><span class="pill md">大</span></td><td><span class="pill md">中</span></td><td>減光を強める → 単色化 → 厚み0（前面のみ）。カメラ回転制限とビネットが最大の保険</td></tr>
+      <tr><td class="id">R4</td><td>Three.js r186 が長期間リリースされない</td><td><span class="pill lo">中</span></td><td><span class="pill md">中</span></td><td>レンダラ抽象レイヤ。自前WGSL実装を先に作る</td></tr>
+      <tr><td class="id">R5</td><td>深度プレーンの圧縮率が想定に届かない</td><td><span class="pill lo">中</span></td><td><span class="pill md">中</span></td><td>10bitに落とす／平滑化してから量子化／色プレーンのqで融通</td></tr>
+      <tr><td class="id">R6</td><td>iOS のメモリ上限でタブが落ちる</td><td><span class="pill md">大</span></td><td><span class="pill lo">低</span></td><td>ピーク約630MBの見積もり。セグメンテーションと深度のセッションを同時に持たない</td></tr>
+      <tr><td class="id">R7</td><td>10秒 SLO に収まらない</td><td><span class="pill lo">中</span></td><td><span class="pill md">中</span></td><td>削るのではなく、優先度2以降をプレビュー後に回す。量子化は書き出し時まで遅延</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="callout alert">
+    <span class="tag">R1 だけは性質が違います</span>
+    <p>WebGPU 自体は iOS 26 / Safari で使えますが、<strong>ONNX Runtime Web の WebGPU EP が iOS 上で安定動作するかは別問題</strong>です。ORT の検証は Chrome / Desktop 中心で、Safari 特有の実装差で失敗しうる。さらに q4f16 は <code>MatMulNBits</code> という比較的新しい演算子を使い、Safari で動く保証がありません。</p>
+    <p>そこで<strong>他の何よりも先に、これだけを検証する1ファイルのHTML</strong>を作り、Pages にデプロイして実機の iPhone と Android で開きます。3つの量子化構成の成否・所要時間・出力の妥当性を画面に出すだけのもので、1〜2日。<strong>この結果が出るまで本実装に入りません。</strong></p>
+    <p>3段すべて失敗した場合、D1（完全オンデバイス）を諦めて外部APIを使うしかなく、それは要件の変更なのでご相談することになります。</p>
+  </div>
+
+  <h3>PoC の実施順序</h3>
+  <div class="stack">
+    <div class="step"><span class="sn">PoC-1</span><span class="sl"><b>ORT WebGPU × 実機</b> — 3量子化構成の成否と速度、メモリ実測。<strong>失敗すると設計全体が成立しない</strong></span><span class="sv">1〜2 日</span></div>
+    <div class="step"><span class="sn">PoC-2</span><span class="sl"><b>深度量子化の精度</b> — 較正12枚で AbsRel と δ精度を測る。Python完結でCIに載せられる</span><span class="sv">0.5 日</span></div>
+    <div class="step"><span class="sn">PoC-5</span><span class="sl"><b>深度プレーンの圧縮率</b> — 5つのエンコード方式でサイズを比較。サイズ見積もりの根幹</span><span class="sv">0.5 日</span></div>
+    <div class="step"><span class="sn">PoC-3</span><span class="sl"><b>背面シェルの見た目</b> — 最小描画実装でサンプル10枚を±60°まで回して目視評価。机上では判断できない</span><span class="sv">2〜3 日</span></div>
+  </div>
+</section>
+
+<!-- ============ 09 ============ -->
+<section id="index">
+  <div class="shead"><span class="n">09</span><h2 class="st">設計書一覧</h2></div>
+  <p class="sdek">本ページは要約です。実装に着手できる粒度の本体は <code>docs/</code> 配下の8本にあります。</p>
+  <div class="docs">
+    <a class="doc" href="./01-requirements.md"><span class="dn">01</span><span class="dt">要件と決定事項</span><span class="dd">確定要件、スコープ、非スコープ、参考文献の評価、用語</span></a>
+    <a class="doc" href="./02-architecture.md"><span class="dn">02</span><span class="dt">アーキテクチャ</span><span class="dd">レイヤ構成、実行モデル、PhotoSplatDocument、モデルレジストリ、ディレクトリ構成</span></a>
+    <a class="doc" href="./03-pipeline.md"><span class="dn">03</span><span class="dt">生成パイプライン</span><span class="dd">セグメンテーション、深度2パス、較正、シェル構築、スカート、QAT微調整</span></a>
+    <a class="doc" href="./04-compression.md"><span class="dn">04</span><span class="dt">軽量化・量子化設計</span><span class="dd">4階層の全詳細、ビット割当の根拠、不採用手法、品質プリセット</span></a>
+    <a class="doc" href="./05-data-formats.md"><span class="dn">05</span><span class="dt">データ形式</span><span class="dd">.pgs のコンテナ仕様とマニフェスト、.spz / .ply への変換</span></a>
+    <a class="doc" href="./06-rendering.md"><span class="dn">06</span><span class="dt">レンダリング</span><span class="dd">レンダラ抽象、描画パス、背面カリング、ソート、LOD、カメラ操作</span></a>
+    <a class="doc" href="./07-cicd.md"><span class="dn">07</span><span class="dt">CI/CD と性能バジェット</span><span class="dd">4ワークフローの実装、較正、バジェット定義、Pages制約、帯域対策</span></a>
+    <a class="doc" href="./08-risks.md"><span class="dn">08</span><span class="dt">リスクと検証計画</span><span class="dd">リスク一覧、縮退設計、PoC計画、未解決の設計上の問い</span></a>
+  </div>
+</section>
+
+</main>
+</div>
+</div>
+
+<div id="tt" role="status" aria-live="polite"></div>
+
+<script>
+(function(){
+  var tt = document.getElementById('tt');
+  function show(e, t, v){
+    tt.innerHTML = '<b>' + t + '</b><br>' + v;
+    tt.classList.add('on');
+    move(e);
+  }
+  function move(e){
+    var w = tt.offsetWidth, h = tt.offsetHeight;
+    var x = e.clientX + 14, y = e.clientY - h - 12;
+    if (x + w > window.innerWidth - 8) x = e.clientX - w - 14;
+    if (y < 8) y = e.clientY + 18;
+    tt.style.left = x + 'px';
+    tt.style.top = y + 'px';
+  }
+  function hide(){ tt.classList.remove('on'); }
+
+  document.querySelectorAll('.hit').forEach(function(el){
+    el.addEventListener('pointerenter', function(e){ show(e, el.dataset.t, el.dataset.v); });
+    el.addEventListener('pointermove', move);
+    el.addEventListener('pointerleave', hide);
+  });
+  window.addEventListener('scroll', hide, {passive:true});
+})();
+</script>
