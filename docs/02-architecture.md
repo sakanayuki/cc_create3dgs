@@ -14,7 +14,8 @@ flowchart TB
             DEP["② 深度推定<br/>Depth Anything V2 Small"]
             GEO["③ 幾何構築<br/>較正 → 前面 → 背面 → スカート"]
             GAU["④ ガウシアン化<br/>適応サンプリング"]
-            REF["⑤ 微調整<br/>QAT 付き最適化"]
+            INP["⑤ 遮蔽部インペイント<br/>MI-GAN"]
+            REF["⑥ 継ぎ目補正<br/>短い最適化"]
         end
 
         subgraph core["共有 WebGPU デバイス"]
@@ -33,7 +34,7 @@ flowchart TB
     end
 
     UI --> pipe
-    SEG --> DEP --> GEO --> GAU --> REF
+    SEG --> DEP --> GEO --> GAU --> INP --> REF
     pipe --> core
     REF --> STORE
     GAU -.->|プレビュー先行| STORE
@@ -44,7 +45,7 @@ flowchart TB
 ```
 
 処理は一方向に流れる。④の直後に**プレビュー用のドキュメントを確定させて描画層に渡す**ため、
-ユーザーは⑤の微調整を待たずに操作を開始できる。⑤が終わると、ドキュメントが差し替わって画質が向上する。
+ユーザーは⑤⑥を待たずに操作を開始できる。⑤のインペイントが終わると遮蔽部とスカートの色が差し替わり、⑥で継ぎ目が整う。
 
 ## 2.2 レイヤ構成と責務
 
@@ -80,7 +81,8 @@ UI ──▶ 状態管理 ◀── パイプライン ──▶ ランタイム
 | 描画ループ | メインスレッド | canvas への描画。60fps を維持するため他の重い処理を置かない |
 | セグメンテーション・深度推定 | **Worker** | 数百msブロックするとタップ操作が固まる |
 | 幾何構築・ガウシアン化 | **Worker** | 同上 |
-| 微調整（QAT最適化） | **Worker** | 2.5秒間ブロックする。プレビューの操作性を守るため必須 |
+| 遮蔽部インペイント（MI-GAN） | **Worker** | 約0.9秒 |
+| 継ぎ目補正 | **Worker** | 約0.6秒。プレビューの操作性を守るため必須 |
 | 量子化・パッキング | **Worker** | PNG/WebPエンコードを含む |
 
 GitHub Pages は COOP/COEP ヘッダを返せないため `SharedArrayBuffer` が使えない。
@@ -98,7 +100,7 @@ GitHub Pages は COOP/COEP ヘッダを返せないため `SharedArrayBuffer` �
 - **描画用のデバイス**: メインスレッドで生成
 - 両者の間のデータ受け渡しは `ArrayBuffer` 経由（GPU→CPU→GPU）
 
-GPU⇄CPU の往復が入るが、受け渡すのは1回きり（微調整済みガウシアン群、後述の通り約2.4MB）なので数ms で済み、10秒予算に対して無視できる。
+GPU⇄CPU の往復が入るが、受け渡すのは画像プレーン一式（1024² で約 8MB）を数回だけなので数十ms で済み、10秒予算に対して無視できる。
 デバイスを2つ持つコストより、描画スレッドをブロックしない利益が大きい。
 
 ## 2.4 中心データ構造 `PhotoSplatDocument`
@@ -109,13 +111,13 @@ GPU⇄CPU の往復が入るが、受け渡すのは1回きり（微調整済み
 ```ts
 /** 生成結果1件を表す。全モジュールがこれだけを介してやり取りする。 */
 interface PhotoSplatDocument {
-  /** 作業グリッドの解像度。既定 512×512。 */
+  /** 作業グリッドの解像度。既定 1024×1024（軽量プリセットは 512×512）。 */
   readonly width: number;
   readonly height: number;
 
   /** 仮想カメラの内部パラメータ。深度から3D位置を復元するのに必須。 */
   readonly camera: {
-    /** 焦点距離（ピクセル単位）。EXIF から取得、無ければ FOV 55° 相当を仮定。 */
+    /** 焦点距離（ピクセル単位）。優先順: 深度モデルの推定値(DA3) → EXIF → FOV 55° 相当の仮定。 */
     focalPx: number;
     /** 主点。既定は画像中心。 */
     cx: number; cy: number;
@@ -131,14 +133,14 @@ interface PhotoSplatDocument {
   readonly frontColor: Uint8ClampedArray;
   /** 不透明度 兼 占有マスク。0 は「ガウシアンなし」を意味する。 */
   readonly alpha: Uint8ClampedArray;
-  /** 背面までの厚み。0..65535。0 は背面シェルなしを意味する。 */
-  readonly thickness: Uint16Array;
-  /** 背面の色。省略時は前面色から導出する（§03参照）。 */
-  readonly backColor?: Uint8ClampedArray;
+  /** 背面の色（width/2 × height/2、背面は 1/4 密度）。人物は無地陰影、物体は鏡像から生成。 */
+  readonly backColor: Uint8ClampedArray;
+  /** 遮蔽部の補完テクスチャ (RGBA)。MI-GAN の出力。α=0 は「補完なし」。 */
+  readonly inpaint: Uint8ClampedArray;
 
-  // ---- 画像平面に載らない補助ガウシアン ----
-  /** 深度不連続の縁を塞ぐスカート。数が少ないので個別に持つ。 */
-  readonly skirt: LooseGaussians | null;
+  // ---- 決定的に導出される要素（保存しない） ----
+  /** 厚みは alpha の距離変換から、スカートは frontDepth/alpha/inpaint から読込時に再計算する。 */
+  readonly derived: { thicknessT: number; skirtParams: SkirtParams; samplingParams: SamplingParams };
 
   /** 生成の由来と設定。書き出し時にメタデータとして埋める。 */
   readonly meta: DocumentMeta;
@@ -166,8 +168,9 @@ interface LooseGaussians {
 3. **画像コーデックがそのまま使える。** 隣接ピクセルの値が似ているため、PNG の予測フィルタや WebP の空間予測が最大限効く。
    一般の3DGS圧縮ではこの並び順を作るために重いソートが要る（[04](./04-compression.md#432-なぜ本設計では並べ替えが不要か)）。
 
-`skirt` だけは画像平面に載らない（深度の縁から「はみ出す」位置に置くため）が、
-全体の5%程度の個数なので、素の配列で持ってもサイズへの影響は小さい。
+スカートは画像平面に載らない（深度の縁から「はみ出す」位置に置くため）が、
+その幾何は `frontDepth` と `alpha` から決定的に導出でき、色は `inpaint` プレーンからサンプルする。
+したがってドキュメントには**パラメータだけ**を持ち、実体は読込時・描画時に生成する。
 
 ## 2.5 ランタイム層 — WebGPUデバイスの共有
 
@@ -198,18 +201,41 @@ ONNX Runtime Web の WebGPU EP には、外部で作った `GPUDevice` を渡す
   "profiles": {
     // 既定。MIT / Apache-2.0 のみ。商用利用に制約なし。
     "permissive": {
-      "depth":       "depth-anything-v2-small",
+      "depth":       "depth-anything-v3-small",     // v2: 第一候補。PoC で v2-small と比較して確定
+      "depthFallback": "depth-anything-v2-small",
       "mattePerson": "modnet",
-      "matteObject": "isnet-general"
+      "matteObject": "isnet-general",
+      "inpaint":     "mi-gan"
     },
     // 非商用でよい場合に切り替えるプロファイル。背景除去の精度が上がる。
     "research": {
-      "depth":       "depth-anything-v2-small",
+      "depth":       "depth-anything-v3-small",
+      "depthFallback": "depth-anything-v2-small",
       "mattePerson": "modnet",
-      "matteObject": "rmbg-1.4"
+      "matteObject": "rmbg-1.4",
+      "inpaint":     "mi-gan"
     }
   },
   "models": {
+    "depth-anything-v3-small": {
+      "source": "hf:depth-anything/DA3-SMALL",
+      "onnx":   "hf:onnx-community/depth-anything-v3-small/onnx/model.onnx",
+      "license": "Apache-2.0",
+      "commercialUse": true,
+      "quantization": { "mode": "q4f16", "excludeOpTypes": ["LayerNormalization", "Softmax"], "keepHeadFp16": true },
+      "expectedBytes": 22000000,
+      "inputSize": [518, 518],
+      "outputs": ["depth", "intrinsics"]
+    },
+    "mi-gan": {
+      "source": "hf:andraniksargsyan/migan (原リポジトリ Picsart-AI-Research/MI-GAN, MIT)",
+      "onnx":   "hf:andraniksargsyan/migan/migan_pipeline_v2.onnx",
+      "license": "MIT",
+      "commercialUse": true,
+      "quantization": { "mode": "uint8", "perChannel": true },
+      "expectedBytes": 8000000,
+      "inputSize": [512, 512]
+    },
     "depth-anything-v2-small": {
       "source": "hf:depth-anything/Depth-Anything-V2-Small",
       "onnx":   "hf:onnx-community/depth-anything-v2-small/onnx/model.onnx",
@@ -257,7 +283,9 @@ ONNX Runtime Web の WebGPU EP には、外部で作った `GPUDevice` を渡す
 
 | 用途 | モデル | ライセンス | 元サイズ | 量子化後 | 備考 |
 |---|---|---|---|---|---|
-| 深度推定 | Depth Anything V2 Small | **Apache-2.0** | 99.1 MB | **19.1 MB** (q4f16) | 唯一の必須モデル。V2 の Base/Large は CC-BY-NC のため使用不可 |
+| 深度推定（第一候補） | **Depth Anything 3 Small** | **Apache-2.0** | 104.7 MB | **約 22 MB** (q4f16, 見込み) | 深度を直接予測（逆深度ではない）、カメラ内部パラメータも出力。「DA2 を大幅に上回る」と公式に記載。ORT WebGPU での動作は PoC-1 で検証 |
+| 深度推定（代替） | Depth Anything V2 Small | **Apache-2.0** | 99.1 MB | **19.1 MB** (q4f16) | 実績あり。V2 の Base/Large は CC-BY-NC のため使用不可 |
+| 遮蔽部インペイント | **MI-GAN** (Picsart) | **MIT** | 29.5 MB | **約 8 MB** (uint8) | モバイル向けに設計された軽量インペイント。512² 入力 |
 | 人物マット | MODNet (Xenova) | **Apache-2.0** | 25.9 MB | **6.6 MB** (uint8) | 人物特化。軽くて速い |
 | 汎用マット | ISNet-general (img.ly) | **MIT** | 176.1 MB | **約44 MB** (uint8, CIで生成) | 物体全般。量子化版は未公開のため自前で作る |
 | 汎用マット（代替） | RMBG-1.4 | **非商用** | 176.2 MB | 44.4 MB (公開済) | 精度は高いが商用不可。`research` プロファイル専用 |
@@ -308,11 +336,12 @@ cc_create3dgs/
 │   │   ├─ worker.ts           # Worker エントリ
 │   │   ├─ 1-matte.ts          # ① 被写体抽出
 │   │   ├─ 2-depth.ts          # ② 深度推定 (タイル分割含む)
-│   │   ├─ 3-calibrate.ts      # ③a 深度の較正・メトリック化
+│   │   ├─ 3-calibrate.ts      # ③a 深度の較正・シフト推定・エッジ保存シャープ化
 │   │   ├─ 4-shell.ts          # ③b 前面/背面シェル・厚み推定
 │   │   ├─ 5-skirt.ts          # ③c スカート生成
 │   │   ├─ 6-gaussianize.ts    # ④ 適応サンプリング
-│   │   ├─ 7-refine.ts         # ⑤ QAT付き微調整
+│   │   ├─ 7-inpaint.ts        # ⑤ 遮蔽部インペイント (MI-GAN)
+│   │   ├─ 8-refine.ts         # ⑥ 継ぎ目補正（短い最適化）
 │   │   └─ wgsl/               #   各段のWGSLカーネル
 │   │
 │   ├─ codec/
