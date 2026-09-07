@@ -3,7 +3,6 @@
 // ソート済みインデックスの順にインスタンス描画し、各スプラットを画面空間の
 // 楕円としてクアッドに載せて α ブレンドする。ソートは遠→近なので "over" で正しい。
 
-@group(0) @binding(0) var<storage, read> splats: array<Splat>;
 @group(0) @binding(1) var<uniform>       cam:    Camera;
 @group(0) @binding(2) var<storage, read> sorted: array<u32>;
 
@@ -33,7 +32,7 @@ const CORNERS = array<vec2<f32>, 4>(
 @vertex
 fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VSOut {
   var out: VSOut;
-  let s = splats[sorted[ii]];
+  let s = loadSplat(sorted[ii]);
 
   let clip = cam.viewProj * vec4<f32>(s.pos, 1.0);
   if (clip.w <= 0.0) {

@@ -429,3 +429,104 @@ export async function benchRender(
   }
 }
 
+
+export interface PixelProbe {
+  backend: RendererBackend;
+  width: number;
+  height: number;
+  /** 背面カリング後に描画されたスプラット数（レンダラの自己申告）。 */
+  drawnSplats: number;
+  /** 実際に色が乗ったピクセル数。ここが 0 なら「何も描けていない」。 */
+  litPixels: number;
+  /** litPixels / 全ピクセル。 */
+  coverage: number;
+  /** 描画ピクセルの重心（0〜1、キャンバス左上原点）。 */
+  centroid: [number, number] | null;
+  /** 描画領域の外接矩形 [x0, y0, x1, y1]（0〜1）。 */
+  bbox: [number, number, number, number] | null;
+  /** 描画ピクセルの平均色（0〜255）。 */
+  meanColor: [number, number, number] | null;
+}
+
+/**
+ * 実際にピクセルが出ているかを読み戻して確かめる（R12 の前提条件）。
+ *
+ * フレーム時間だけを測っても「真っ黒を高速に描く」バグは見つからない。
+ * ここでは1フレーム描いてキャンバスの中身を読み、色が乗った画素の数・重心・
+ * 外接矩形まで返す。手続き生成の球殻を正面から見ているので、正しく描けていれば
+ * 画面中央に丸い塊が出るはずで、重心と外接矩形でそこまで確かめられる。
+ *
+ * 読み戻しはレンダラの `readPixels()` に任せる。キャンバスを 2D に drawImage する
+ * 手は WebGPU では常に空が返った（SwiftShader で実測）ので使えない。
+ * WebGL2 側は描画バッファを保存しない設定なので、`render()` と同じタスクの中で
+ * 読む必要がある。だから最後の render() の直後に await を挟まずに呼ぶ。
+ */
+export async function probePixels(
+  canvas: HTMLCanvasElement,
+  splatCount = 20_000,
+  force?: RendererBackend,
+  size = 256,
+): Promise<PixelProbe> {
+  const { renderer, backend } = await createRenderer({ canvas, ...(force ? { force } : {}) });
+  try {
+    renderer.resize(size, size);
+    renderer.setSplats(makeProceduralSplats(splatCount), splatCount);
+    renderer.setDepthRange(0.5, 1.6);
+    renderer.setCamera({ yaw: 0, pitch: 0, distance: 1.0, target: [0, 0, 0] });
+
+    // シェーダとバッファの準備を済ませてから本番の1フレームを描く。
+    for (let i = 0; i < 2; i++) {
+      renderer.render();
+      await renderer.flush();
+    }
+
+    renderer.render();
+    const px = await renderer.readPixels();
+
+    let lit = 0;
+    let sx = 0;
+    let sy = 0;
+    let sr = 0;
+    let sg = 0;
+    let sb = 0;
+    let x0 = size;
+    let y0 = size;
+    let x1 = -1;
+    let y1 = -1;
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const i = (y * size + x) * 4;
+        // アルファか輝度のどちらかが立っていれば「描かれた」とみなす。
+        // 背景は透明かつ黒なので、この判定で取りこぼさない。
+        const a = px[i + 3] as number;
+        const lum = (px[i] as number) + (px[i + 1] as number) + (px[i + 2] as number);
+        if (a <= 8 && lum <= 12) continue;
+        lit++;
+        sx += x;
+        sy += y;
+        sr += px[i] as number;
+        sg += px[i + 1] as number;
+        sb += px[i + 2] as number;
+        if (x < x0) x0 = x;
+        if (y < y0) y0 = y;
+        if (x > x1) x1 = x;
+        if (y > y1) y1 = y;
+      }
+    }
+
+    const n = Math.max(lit, 1);
+    return {
+      backend,
+      width: size,
+      height: size,
+      drawnSplats: renderer.stats.drawnSplats,
+      litPixels: lit,
+      coverage: Math.round((lit / (size * size)) * 10_000) / 10_000,
+      centroid: lit > 0 ? [sx / n / size, sy / n / size] : null,
+      bbox: lit > 0 ? [x0 / size, y0 / size, (x1 + 1) / size, (y1 + 1) / size] : null,
+      meanColor: lit > 0 ? [Math.round(sr / n), Math.round(sg / n), Math.round(sb / n)] : null,
+    };
+  } finally {
+    renderer.dispose();
+  }
+}

@@ -8,10 +8,13 @@ import {
   CANDIDATES,
   benchRender,
   benchThreads,
+  makeProceduralSplats,
+  probePixels,
   syntheticThreadTarget,
   testModel,
   type Candidate,
   type ModelResult,
+  type PixelProbe,
   type RenderBenchResult,
   type ThreadTarget,
 } from './bench';
@@ -35,6 +38,7 @@ const state: {
   capability?: Capability;
   models: ModelResult[];
   render: RenderBenchResult[];
+  probe?: PixelProbe;
   threads: ThreadTestResponse[];
   threadTarget?: string;
 } = { models: [], render: [], threads: [] };
@@ -278,6 +282,22 @@ async function runRenderBench(): Promise<void> {
     return;
   }
 
+  // 速度を測る前に「本当にピクセルが出ているか」を確かめる。
+  // フレーム時間だけでは、真っ黒を高速に描いていても速いと出てしまう。
+  try {
+    const probe = await probePixels(canvas, 20_000, backendLabel as 'webgpu' | 'webgl2', 256);
+    state.probe = probe;
+    const ok = probe.litPixels > 1000;
+    out.innerHTML +=
+      `<div class="row" style="gap:8px">
+         <span class="pill ${ok ? 'ok' : 'ng'}">${ok ? '描画を確認' : '何も描けていない'}</span>
+         <span class="mono">${probe.litPixels.toLocaleString('ja-JP')} px
+         （面積 ${(probe.coverage * 100).toFixed(0)}%、重心 ${probe.centroid ? probe.centroid.map((v) => v.toFixed(2)).join(', ') : '—'}）</span>
+       </div>`;
+  } catch (e) {
+    out.innerHTML += `<div><span class="pill ng">描画確認に失敗</span> ${esc(String(e))}</div>`;
+  }
+
   // WebGL2 は WebGPU より遅いので、60fps ではなく 30fps を目標にする（docs/01 §1.4）
   const targetMs = backendLabel === 'webgpu' ? 16.6 : 33.3;
   const targetLabel = backendLabel === 'webgpu' ? '60fps' : '30fps';
@@ -332,6 +352,7 @@ function summary(): Record<string, unknown> {
       対象: state.threadTarget ?? null,
       結果: state.threads,
     },
+    描画の中身: state.probe ?? null,
     描画ベンチ: state.render,
     判定: verdicts(),
   };
@@ -473,3 +494,20 @@ async function guard(fn: () => Promise<void>): Promise<void> {
     dumpResults();
   }
 }
+
+/**
+ * E2E から描画の中身を確かめるための入口（tests/e2e/render.spec.ts）。
+ *
+ * PoC ハーネスは診断用のページなので、テストに必要な関数をここから出しておく。
+ * 本体アプリ（index.html）には出さない。
+ */
+declare global {
+  interface Window {
+    __photosplat?: {
+      probePixels: typeof probePixels;
+      createRenderer: typeof createRenderer;
+      makeProceduralSplats: typeof makeProceduralSplats;
+    };
+  }
+}
+window.__photosplat = { probePixels, createRenderer, makeProceduralSplats };

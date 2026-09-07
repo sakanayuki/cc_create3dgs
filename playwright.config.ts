@@ -43,7 +43,9 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: 'npm run preview -- --port 4173 --strictPort',
+    // 必ずビルドしてから配信する。dist が古いままだと、直したはずのコードを
+    // 検証しないまま通ってしまう（実際に一度それで空振りした）。
+    command: 'npm run build && npm run preview -- --port 4173 --strictPort',
     url: 'http://127.0.0.1:4173',
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,

@@ -38,6 +38,12 @@ vec3 decodeOct(uint packed) {
   return normalize(n);
 }
 
+// RGBA8 の復号。GLSL ES 3.00 に unpackUnorm4x8 は無い（あれは ES 3.10 以降）ので
+// 自前でバイトを取り出す。並びは packRgba8 と同じく r が最下位バイト。
+vec4 unpackRgba8(uint packed) {
+  return vec4(uvec4(packed, packed >> 8u, packed >> 16u, packed >> 24u) & 0xffu) / 255.0;
+}
+
 // 法線から接平面の正規直交基底を作る（Duff らの分岐なし ONB）。WGSL 版と同じ。
 void onb(vec3 n, out vec3 t1, out vec3 t2) {
   float s = n.z >= 0.0 ? 1.0 : -1.0;
@@ -57,7 +63,7 @@ void main() {
   vec3 pos = vec3(uintBitsToFloat(a.x), uintBitsToFloat(a.y), uintBitsToFloat(a.z));
   vec3 nrm = decodeOct(a.w);
   vec2 scale = unpackHalf2x16(b.x);
-  vec4 color = unpackUnorm4x8(b.y);
+  vec4 color = unpackRgba8(b.y);
 
   vec4 clip = uViewProj * vec4(pos, 1.0);
   if (clip.w <= 0.0) {

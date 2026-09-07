@@ -12,6 +12,31 @@ struct Splat {
   color: u32,
 };
 
+// スプラット配列は「生の u32 列」として受け、手で切り出す。
+//
+// array<Splat> にしてはいけない。vec3<f32> を含む構造体は整列規則で
+// 16 バイト境界に切り上げられ、配列のストライドが 24 ではなく 32 バイトになる。
+// CPU 側（SPLAT_BYTES = 24）とずれるので、3個に1個だけ偶然正しい位置に当たり、
+// 残りは隣のスプラットの断片を読む。球は球らしく見えたまま画面全体に薄い靄と
+// 筋が乗る、という気付きにくい壊れ方をする。ピクセルを読み戻して初めて分かった。
+const SPLAT_WORDS: u32 = 6u;  // 24 バイト = u32 6 個
+
+@group(0) @binding(0) var<storage, read> splatWords: array<u32>;
+
+fn loadSplat(i: u32) -> Splat {
+  let o = i * SPLAT_WORDS;
+  var s: Splat;
+  s.pos = vec3<f32>(
+    bitcast<f32>(splatWords[o]),
+    bitcast<f32>(splatWords[o + 1u]),
+    bitcast<f32>(splatWords[o + 2u]),
+  );
+  s.nrm = splatWords[o + 3u];
+  s.scale = splatWords[o + 4u];
+  s.color = splatWords[o + 5u];
+  return s;
+}
+
 struct Camera {
   viewProj: mat4x4<f32>,
   view: mat4x4<f32>,

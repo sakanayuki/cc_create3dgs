@@ -410,6 +410,28 @@ export class Webgl2SplatRenderer implements SplatRenderer {
     }
   }
 
+  /**
+   * 既定のフレームバッファから読む。
+   *
+   * `preserveDrawingBuffer: false` なので、合成が走ると中身は消える。
+   * よって `render()` と同じタスクの中で（await を挟まずに）呼ぶこと。
+   * gl.readPixels は左下原点なので、上下を入れ替えて返す。
+   */
+  async readPixels(): Promise<Uint8Array> {
+    const gl = this.gl;
+    const w = gl.drawingBufferWidth;
+    const h = gl.drawingBufferHeight;
+    const flipped = new Uint8Array(w * h * 4);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, flipped);
+    const out = new Uint8Array(w * h * 4);
+    const row = w * 4;
+    for (let y = 0; y < h; y++) {
+      out.set(flipped.subarray((h - 1 - y) * row, (h - y) * row), y * row);
+    }
+    return out;
+  }
+
   dispose(): void {
     const gl = this.gl;
     if (this.vao) gl.deleteVertexArray(this.vao);

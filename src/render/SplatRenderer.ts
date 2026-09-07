@@ -44,6 +44,15 @@ export interface SplatRenderer {
    * （待つとパイプラインが止まって遅くなる）。待ち方はバックエンドで違う。
    */
   flush(): Promise<void>;
+  /**
+   * 直前の `render()` が出したピクセルを RGBA8 で読み戻す（左上原点）。
+   *
+   * 検証専用。フレーム時間や drawnSplats はレンダラの自己申告なので、
+   * 「真っ黒を高速に描く」バグはそれでは見つからない。
+   * キャンバスを 2D に drawImage する手は WebGPU では使えない（実測で
+   * 常に空になった）ので、バックエンドごとの正規の経路で読む。
+   */
+  readPixels(): Promise<Uint8Array>;
   resize(width: number, height: number): void;
   dispose(): void;
   readonly stats: RenderStats;

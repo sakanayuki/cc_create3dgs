@@ -80,6 +80,9 @@ export class WgslSplatRenderer implements SplatRenderer {
       device: this.device,
       format: this.format,
       alphaMode: 'premultiplied',
+      // COPY_SRC は readPixels() のため。描画そのものには要らないが、
+      // 後から付け替えられないので最初から付けておく（コストは無い）。
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
     });
 
     const d = this.device;
@@ -315,6 +318,54 @@ export class WgslSplatRenderer implements SplatRenderer {
   /** 投入済みの作業が終わるまで待つ。WebGPU はこれが最も実測に近い。 */
   async flush(): Promise<void> {
     await this.device.queue.onSubmittedWorkDone();
+  }
+
+  /**
+   * キャンバステクスチャをバッファへコピーして読む。
+   *
+   * copyTextureToBuffer の bytesPerRow は 256 の倍数でなければならないので、
+   * 詰め物を入れて転送し、行ごとに切り出して詰め直す。
+   * 既定のキャンバス形式は多くの環境で bgra8unorm なので、その場合は
+   * 赤と青を入れ替えて RGBA として返す。
+   */
+  async readPixels(): Promise<Uint8Array> {
+    const w = this.width;
+    const h = this.height;
+    const bytesPerRow = Math.ceil(w * 4 / 256) * 256;
+    const buf = this.device.createBuffer({
+      size: bytesPerRow * h,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    try {
+      const enc = this.device.createCommandEncoder();
+      enc.copyTextureToBuffer(
+        { texture: this.ctx.getCurrentTexture() },
+        { buffer: buf, bytesPerRow, rowsPerImage: h },
+        { width: w, height: h, depthOrArrayLayers: 1 },
+      );
+      this.device.queue.submit([enc.finish()]);
+      await buf.mapAsync(GPUMapMode.READ);
+      const src = new Uint8Array(buf.getMappedRange());
+      const out = new Uint8Array(w * h * 4);
+      const bgra = this.format.startsWith('bgra');
+      for (let y = 0; y < h; y++) {
+        const s = y * bytesPerRow;
+        const d = y * w * 4;
+        for (let x = 0; x < w * 4; x += 4) {
+          const r = src[s + x] as number;
+          const g = src[s + x + 1] as number;
+          const b = src[s + x + 2] as number;
+          out[d + x] = bgra ? b : r;
+          out[d + x + 1] = g;
+          out[d + x + 2] = bgra ? r : b;
+          out[d + x + 3] = src[s + x + 3] as number;
+        }
+      }
+      buf.unmap();
+      return out;
+    } finally {
+      buf.destroy();
+    }
   }
 
   dispose(): void {

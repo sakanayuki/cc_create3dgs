@@ -13,7 +13,6 @@ const BUCKETS: u32 = 8192u;
 const SCAN_THREADS: u32 = 256u;
 const PER_THREAD: u32 = BUCKETS / SCAN_THREADS;  // 32
 
-@group(0) @binding(0) var<storage, read>       splats:    array<Splat>;
 @group(0) @binding(1) var<uniform>             cam:       Camera;
 @group(0) @binding(2) var<storage, read_write> histogram: array<atomic<u32>>;
 @group(0) @binding(3) var<storage, read_write> offsets:   array<u32>;
@@ -32,7 +31,7 @@ fn bucketOf(depth: f32) -> u32 {
 
 // 描画対象かどうか。背面カリングと視錐台カリング（docs/06 §6.4）。
 fn isVisible(i: u32, depth: ptr<function, f32>) -> bool {
-  let s = splats[i];
+  let s = loadSplat(i);
   let toEye = cam.eye - s.pos;
   let d = length(toEye);
   if (d < 1e-6) { return false; }
