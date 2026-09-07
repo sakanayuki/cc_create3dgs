@@ -9,19 +9,35 @@
  * インペイントと継ぎ目補正を待たずに見せるほうが体感が速いため。
  */
 import * as ort from 'onnxruntime-web';
-import { estimateNormals, calibrate } from './3-calibrate';
+import { estimateNormals, calibrate, pullBoundaryDepthInward } from './3-calibrate';
 import { thicknessMap } from './4-shell';
 import { buildSplats, DEFAULT_BUILD_PARAMS, type BuildParams, type SplatBuild } from './6-splats';
 import { adaptiveSample, solveSamplingParams, samplingReduction } from './7-sample';
 import { refineMatte } from './1-matte';
-import { prepareImage, WORKING_GRID, type Letterbox } from './0-preprocess';
+import {
+  depthTiles,
+  prepareImage,
+  subjectBBox,
+  WORKING_GRID,
+  type Letterbox,
+  type Rect,
+} from './0-preprocess';
+import { fuseDepth, type DepthTile } from './2-depth';
 import {
   buildInpaintMask,
   compositeInpaint,
   stretchFallback,
   type InpaintMask,
 } from './8-inpaint';
-import { IMAGENET_MEAN, IMAGENET_STD, minMax, resizePlane, resizeRgba, toTensorNCHW } from './imageOps';
+import {
+  cropRgba,
+  IMAGENET_MEAN,
+  IMAGENET_STD,
+  minMax,
+  resizePlane,
+  resizeRgba,
+  toTensorNCHW,
+} from './imageOps';
 import { createSession, type Backend } from '../runtime/OrtSession';
 import { resolveModel, type HfFallback } from '../runtime/modelCatalog';
 
@@ -48,6 +64,8 @@ export interface GenerateOptions {
   readonly params?: Partial<BuildParams>;
   /** ⑧ のインペイントを行うか。軽量プリセットは false（docs/04 §4.7）。 */
   readonly inpaint?: boolean;
+  /** ② のタイルパスを行うか。軽量プリセットは false（docs/04 §4.7）。 */
+  readonly depthTiles?: boolean;
 }
 
 export const DEFAULT_GENERATE_OPTIONS: Omit<GenerateOptions, 'backend'> = {
@@ -72,6 +90,12 @@ export interface GenerateResult {
     readonly timings: Record<string, number>;
     /** 深度モデルが内部パラメータを返したか。返さなければ画角を仮定している。 */
     readonly intrinsicsFromModel: boolean;
+    /** 実寸をそのまま使ったか。false なら比率を指定して引き伸ばしている。 */
+    readonly metricDepth: boolean;
+    /** 被写体の 奥行き ÷ 高さ。人物なら 0.3〜0.8 が自然。 */
+    readonly depthToHeight: number;
+    /** 深度タイルパスで実際に使えたタイル数（0 なら全体パスのみ）。 */
+    readonly depthTiles: number;
     /** ⑧ で何を使ったか。mi-gan が本命、stretch は縮退、skipped は段差なし。 */
     readonly inpaint: 'mi-gan' | 'stretch' | 'skipped';
   };
@@ -217,6 +241,8 @@ export interface DepthOutput {
   readonly kind: 'depth' | 'inverse-depth';
   /** モデルが返した焦点距離（画素）。返さなければ null。 */
   readonly focalPx: number | null;
+  /** タイルパスで使い回すためのセッション。 */
+  readonly session: ort.InferenceSession;
 }
 
 /**
@@ -226,14 +252,8 @@ export interface DepthOutput {
  * `intrinsics` があれば焦点距離が直接得られるので、画角の仮定が要らない。
  * 返さないモデル（V2）では呼び出し側が既定値を使う。
  */
-async function runDepth(
-  rgba: Uint8ClampedArray,
-  grid: number,
-  backend: Backend,
-  shaderF16: boolean,
-): Promise<DepthOutput> {
-  const size = 518;
-  const session = await loadModel(
+async function depthSession(backend: Backend, shaderF16: boolean): Promise<ort.InferenceSession> {
+  return loadModel(
     'depth-anything-v3-small',
     backend,
     {
@@ -243,6 +263,35 @@ async function runDepth(
     },
     shaderF16,
   );
+}
+
+/** 切り出した領域を 518² に伸ばして推論し、元の大きさに戻す。 */
+async function inferDepthPatch(
+  session: ort.InferenceSession,
+  rgba: ArrayLike<number>,
+  srcWidth: number,
+  rect: Rect,
+): Promise<Float32Array> {
+  const size = 518;
+  const patch = cropRgba(rgba, srcWidth, rect.x, rect.y, rect.width, rect.height);
+  const small = resizeRgba(patch, rect.width, rect.height, size, size);
+  const input = toTensorNCHW(small, size, size, { mean: IMAGENET_MEAN, std: IMAGENET_STD });
+  const dims = inputDims(declaredRank(session), 3, size, size);
+  const out = await session.run(feedOf(session, new ort.Tensor('float32', input, dims)));
+  const raw = pickOutput(out, session, 'predicted_depth', 'depth', 'output').data as unknown as
+    Float32Array;
+  const side = Math.round(Math.sqrt(raw.length));
+  return resizePlane(raw, side, side, rect.width, rect.height);
+}
+
+async function runDepth(
+  rgba: Uint8ClampedArray,
+  grid: number,
+  backend: Backend,
+  shaderF16: boolean,
+): Promise<DepthOutput> {
+  const size = 518;
+  const session = await depthSession(backend, shaderF16);
 
   const small = resizeRgba(rgba, grid, grid, size, size);
   const input = toTensorNCHW(small, size, size, { mean: IMAGENET_MEAN, std: IMAGENET_STD });
@@ -282,7 +331,53 @@ async function runDepth(
 
   // DA3 は深度そのもの、V2 は逆深度。出力名で見分ける。
   const isInverse = !session.outputNames.some((n) => n.toLowerCase().includes('predicted_depth'));
-  return { raw: full, kind: isInverse ? 'inverse-depth' : 'depth', focalPx };
+  return { raw: full, kind: isInverse ? 'inverse-depth' : 'depth', focalPx, session };
+}
+
+/**
+ * ② のタイルパス（docs/03 §3.4「2パス構成」）。
+ *
+ * 全体パスは 1024² の写真を 518² に縮めて推論するので、**顔が小さすぎて
+ * 構造が出ない**。実写の人物で確かめたところ、全体パスの深度マップは
+ * 顔が「のっぺりした楕円」になり、鼻も眼窩も出ていなかった。同じ顔を
+ * 切り出して 518² で推論し直すと、鼻筋・眼窩・顎が現れる。
+ * これが「人物の立体感が足りない」の主因である。
+ *
+ * 被写体の外接矩形を 2×2 に分けて推論し、全体パスに重ねる。
+ * タイルごとに独自のスケールを持つので、重なりで合わせてから混ぜる
+ * （src/pipeline/2-depth.ts）。
+ */
+async function runDepthTiles(
+  session: ort.InferenceSession,
+  rgba: Uint8ClampedArray,
+  global: Float32Array,
+  alpha: Uint8ClampedArray,
+  grid: number,
+  withShift: boolean,
+): Promise<{ depth: Float32Array; tiles: number }> {
+  const bbox = subjectBBox(alpha, grid, grid);
+  if (!bbox) return { depth: global, tiles: 0 };
+
+  const rects = depthTiles(bbox, grid, grid);
+  const tiles: DepthTile[] = [];
+  for (const rect of rects) {
+    if (rect.width < 32 || rect.height < 32) continue;
+    try {
+      tiles.push({ depth: await inferDepthPatch(session, rgba, grid, rect), rect });
+    } catch {
+      // 1枚失敗しても全体パスは使える。落とさずに続ける。
+    }
+  }
+  if (tiles.length === 0) return { depth: global, tiles: 0 };
+
+  const fused = fuseDepth(global, tiles, grid, grid, {
+    withShift,
+    levels: 6,
+    feather: Math.max(8, Math.round(Math.min(bbox.width, bbox.height) * 0.08)),
+    minConfidence: 0,
+    globalWeight: 0.15,
+  });
+  return { depth: fused.depth, tiles: tiles.length };
 }
 
 /**
@@ -393,10 +488,29 @@ export async function generate(photo: Blob, options: GenerateOptions): Promise<G
   const depthOut = await mark('深度推定', () => runDepth(rgba, grid, opts.backend, shaderF16));
   const focalPx = depthOut.focalPx ?? assumedFocal(grid);
 
+  // タイルパス。全体パスだけだと顔が「のっぺりした楕円」になる（docs/03 §3.4）。
+  let depthRaw = depthOut.raw;
+  let tileCount = 0;
+  if (opts.depthTiles !== false) {
+    report(0.5, '顔まわりの奥行きを詳しく見ています');
+    const tiled = await mark('深度タイルパス', () =>
+      runDepthTiles(
+        depthOut.session,
+        rgba,
+        depthOut.raw,
+        alpha,
+        grid,
+        depthOut.kind === 'inverse-depth',
+      ),
+    );
+    depthRaw = tiled.depth;
+    tileCount = tiled.tiles;
+  }
+
   report(0.62, '奥行きを整えています');
   const calibrated = await mark('深度較正', () =>
     calibrate({
-      raw: depthOut.raw,
+      raw: depthRaw,
       width: grid,
       height: grid,
       alpha,
@@ -405,9 +519,16 @@ export async function generate(photo: Blob, options: GenerateOptions): Promise<G
     }),
   );
 
+  // 髪や輪郭の半透明画素（0 < α < 0.5）は、深度モデルには背景が混ざって
+  // 見えている。その深度をそのまま使うと、髪が後ろへ長く尾を引く。
+  // 最も近い不透明画素の深度で置き換える（docs/03 §3.5.3(c)）。
+  const pulled = await mark('境界深度の引き込み', () =>
+    pullBoundaryDepthInward(calibrated.depth, alpha, grid, grid),
+  );
+
   // 0..1 に直した深度。以降の工程はこの形で受け取る。
   const depth01 = new Float32Array(grid * grid);
-  for (let i = 0; i < depth01.length; i++) depth01[i] = (calibrated.depth[i] as number) / 65535;
+  for (let i = 0; i < depth01.length; i++) depth01[i] = (pulled[i] as number) / 65535;
   // 法線は実距離で推定する。正規化した値のままだと焦点距離と単位が合わない。
   const metric = new Float32Array(grid * grid);
   const span = calibrated.farZ - calibrated.nearZ;
@@ -480,6 +601,9 @@ export async function generate(photo: Blob, options: GenerateOptions): Promise<G
       reduction: samplingReduction(cells),
       timings,
       intrinsicsFromModel: depthOut.focalPx !== null,
+      metricDepth: calibrated.metric,
+      depthToHeight: calibrated.depthToHeight,
+      depthTiles: tileCount,
       inpaint: inpaintUsed,
     },
   };

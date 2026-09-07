@@ -16,11 +16,20 @@ import { Viewer } from './viewer';
 export type Preset = 'light' | 'standard' | 'high';
 
 /** docs/04 §4.7 の品質プリセット。 */
-const PRESETS: Record<Preset, { grid: number; reduction: number; inpaint: boolean; label: string }> = {
-  // 軽量はインペイントを行わない（docs/04 §4.7）。奥側の色を伸ばすだけになる。
-  light: { grid: LIGHT_GRID, reduction: 0.45, inpaint: false, label: '軽量' },
-  standard: { grid: WORKING_GRID, reduction: 0.3, inpaint: true, label: '標準' },
-  high: { grid: WORKING_GRID, reduction: 0, inpaint: true, label: '高品質' },
+interface PresetSpec {
+  grid: number;
+  reduction: number;
+  inpaint: boolean;
+  /** 深度のタイルパス。顔の立体感はほぼこれで決まる（docs/03 §3.4）。 */
+  depthTiles: boolean;
+}
+
+// 表示名は index.html のラジオが持つ。ここは挙動だけ。
+const PRESETS: Record<Preset, PresetSpec> = {
+  // 軽量はタイルパスもインペイントも行わない（docs/04 §4.7）。速いが顔は平坦になる。
+  light: { grid: LIGHT_GRID, reduction: 0.45, inpaint: false, depthTiles: false },
+  standard: { grid: WORKING_GRID, reduction: 0.3, inpaint: true, depthTiles: true },
+  high: { grid: WORKING_GRID, reduction: 0, inpaint: true, depthTiles: true },
 };
 
 const $ = <T extends HTMLElement>(id: string): T => {
@@ -98,6 +107,8 @@ async function ensureViewer(): Promise<Viewer> {
   });
   await viewer.init();
   state.viewer = viewer;
+  // E2E から角度を変えて確かめるための入口。
+  (window as unknown as Record<string, unknown>)['__viewer'] = viewer;
   return viewer;
 }
 
@@ -125,6 +136,7 @@ async function run(file: File): Promise<void> {
       grid: preset.grid,
       reduction: preset.reduction,
       inpaint: preset.inpaint,
+      depthTiles: preset.depthTiles,
       backend: inferenceBackend(cap),
       // shader-f16 が無い WebGPU では q4f16 のモデルが黙って壊れる。
       // その場合は uint8 側を落とす（modelCatalog の manifestBackendKey）。
@@ -160,7 +172,9 @@ async function run(file: File): Promise<void> {
        </div>
        <p class="note">焦点距離 ${result.stats.focalPx.toFixed(0)} px（${
          result.stats.intrinsicsFromModel ? 'モデルの推定値' : '画角 55° の仮定'
-       }） / 遮蔽部の補完: ${
+       }） / 奥行き÷高さ ${result.stats.depthToHeight.toFixed(2)}${
+         result.stats.metricDepth ? '（実寸）' : '（比率指定）'
+       } / 深度タイル ${result.stats.depthTiles} 枚 / 遮蔽部の補完: ${
          { 'mi-gan': 'MI-GAN', stretch: '引き伸ばし（縮退）', skipped: '不要' }[result.stats.inpaint]
        }</p>
        <details><summary>工程ごとの時間</summary><pre class="mono">${esc(

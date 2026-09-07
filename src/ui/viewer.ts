@@ -86,6 +86,29 @@ export class Viewer {
     }
   }
 
+  /** 視点を直接指定する。E2E で角度を変えて撮るのに使う。 */
+  setView(yaw: number, pitch = this.view.pitch, distance = this.view.distance): void {
+    this.introUntil = 0;
+    this.applyView(yaw, pitch, distance);
+  }
+
+  /**
+   * いまの視点で描いて、その中身を読み戻す（検証用）。
+   *
+   * 画面のスクリーンショットでは取れない。描画バッファを保存しない設定
+   * （preserveDrawingBuffer: false）なので、合成が走った後には消えている。
+   * 描画と読み戻しを同じタスクの中で行う必要がある。
+   */
+  async capture(): Promise<Uint8Array | null> {
+    if (!this.renderer) return null;
+    this.renderer.setCamera(this.view);
+    this.renderer.render();
+    await this.renderer.flush();
+    this.renderer.setCamera(this.view);
+    this.renderer.render();
+    return this.renderer.readPixels();
+  }
+
   resize(): void {
     if (!this.renderer) return;
     const dpr = Math.min(2, window.devicePixelRatio || 1);

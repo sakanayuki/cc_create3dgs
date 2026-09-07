@@ -22,8 +22,24 @@ export interface CalibrationInput {
   readonly alpha: Uint8ClampedArray;
   readonly kind: DepthOutputKind;
   readonly focalPx: number;
-  /** 奥行き ÷ 短辺。UI の「立体感」スライダ（0.3〜1.2、既定 0.65）。 */
+  /**
+   * 奥行き ÷ 短辺を**明示的に**指定する（UI の「立体感」スライダ）。
+   *
+   * 省略した場合、深度を直接出すモデル（DA3）では**実寸をそのまま使う**。
+   * 逆深度しか出さないモデル（V2）は絶対スケールを持たないので、
+   * 省略時は既定値 0.65 を使う。
+   */
   readonly depthToWidthRatio?: number;
+  /**
+   * 局所的な起伏の強調倍率（1 で無効）。
+   *
+   * 実寸のままだと、人物は「奥行き ÷ 高さ ≒ 0.6」の薄い物体なので、
+   * 顔の凹凸が見かけの大きさに対して小さく、平らな面に見える。
+   * 大域の形（＝実寸の比率）は保ったまま、細かい起伏だけを持ち上げる。
+   */
+  readonly reliefBoost?: number;
+  /** 局所強調の平滑化半径。被写体の短辺に対する割合。 */
+  readonly reliefRadius?: number;
 }
 
 export interface CalibrationResult {
@@ -35,10 +51,27 @@ export interface CalibrationResult {
   readonly shift: number;
   /** 互換のため残す。solveAffine は最適化しないので常に 0。 */
   readonly silhouetteSamples: number;
+  /** 実寸をそのまま使ったか（DA3 経路で ratio 未指定のとき true）。 */
+  readonly metric: boolean;
+  /** 被写体の 奥行き ÷ 高さ。人物なら 0.3〜0.8 が自然。診断に出す。 */
+  readonly depthToHeight: number;
 }
 
 const SUBJECT_THRESHOLD = 128;
 const DEFAULT_RATIO = 0.65;
+
+/** 局所強調の既定値。実写の人物で測って決めた（docs/03 §3.5.4）。 */
+const DEFAULT_RELIEF_BOOST = 3;
+const DEFAULT_RELIEF_RADIUS = 0.04;
+
+/**
+ * 被写体の「奥行き ÷ 高さ」として許す範囲。
+ *
+ * 人物なら 0.3〜0.8 に収まる。これを大きく外れるときはモデルの実寸が
+ * 当てにならないので、範囲内へ引き戻す。実測では、外れ値を切らないと
+ * 1.47（高さより奥行きが大きい）になり、髪が後ろへ長く尾を引いていた。
+ */
+const PLAUSIBLE_DEPTH_TO_HEIGHT = { min: 0.15, max: 0.9 } as const;
 
 /** 被写体領域のパーセンタイル値を返す。マットの縁の外れ値を避けるため。 */
 function percentileOfSubject(
@@ -237,6 +270,136 @@ export function solveAffine(
 }
 
 /**
+ * 被写体マスクの内側だけで箱平均を取る。
+ *
+ * マスクの外（背景）は平均に入れない。入れると輪郭付近で背景の深度に
+ * 引っ張られ、そこだけ起伏が消える。積分画像なので半径によらず O(n)。
+ */
+function maskedBoxMean(
+  values: ArrayLike<number>,
+  mask: ArrayLike<number>,
+  width: number,
+  height: number,
+  radius: number,
+): Float32Array {
+  const w1 = width + 1;
+  const sumA = new Float64Array(w1 * (height + 1));
+  const sumM = new Float64Array(w1 * (height + 1));
+  for (let y = 0; y < height; y++) {
+    let rowA = 0;
+    let rowM = 0;
+    for (let x = 0; x < width; x++) {
+      const i = y * width + x;
+      const inside = (mask[i] as number) >= SUBJECT_THRESHOLD ? 1 : 0;
+      rowA += inside ? (values[i] as number) : 0;
+      rowM += inside;
+      sumA[(y + 1) * w1 + x + 1] = (sumA[y * w1 + x + 1] as number) + rowA;
+      sumM[(y + 1) * w1 + x + 1] = (sumM[y * w1 + x + 1] as number) + rowM;
+    }
+  }
+
+  const out = new Float32Array(width * height);
+  for (let y = 0; y < height; y++) {
+    const y0 = Math.max(0, y - radius);
+    const y1 = Math.min(height, y + radius + 1);
+    for (let x = 0; x < width; x++) {
+      const x0 = Math.max(0, x - radius);
+      const x1 = Math.min(width, x + radius + 1);
+      const a =
+        (sumA[y1 * w1 + x1] as number) - (sumA[y0 * w1 + x1] as number) -
+        (sumA[y1 * w1 + x0] as number) + (sumA[y0 * w1 + x0] as number);
+      const m =
+        (sumM[y1 * w1 + x1] as number) - (sumM[y0 * w1 + x1] as number) -
+        (sumM[y1 * w1 + x0] as number) + (sumM[y0 * w1 + x0] as number);
+      out[y * width + x] = m > 0 ? a / m : (values[y * width + x] as number);
+    }
+  }
+  return out;
+}
+
+/**
+ * 中央値絶対偏差（MAD）から外れ値に強い範囲を求める。
+ *
+ * 分位（p1..p99）だけでは足りない。外れ値が全体の 1% を超えると
+ * 分位そのものが外れ値の中に入ってしまうためで、実際に髪や
+ * マットの染み出しは被写体の数%を占める。MAD は外れ値が半数に
+ * 達するまで中央値がずれないので、こちらのほうが素直に効く。
+ *
+ * 正規分布なら 1.4826·MAD が標準偏差に一致するので、その k 倍を取る。
+ */
+export function robustRange(
+  values: ArrayLike<number>,
+  alpha: ArrayLike<number>,
+  k = 3,
+): [number, number] {
+  const picked: number[] = [];
+  for (let i = 0; i < values.length; i++) {
+    if ((alpha[i] as number) < SUBJECT_THRESHOLD) continue;
+    const v = values[i] as number;
+    if (Number.isFinite(v)) picked.push(v);
+  }
+  if (picked.length === 0) return [0, 1];
+  picked.sort((a, b) => a - b);
+  const med = picked[Math.floor(picked.length / 2)] as number;
+
+  const dev: number[] = new Array(picked.length);
+  for (let i = 0; i < picked.length; i++) dev[i] = Math.abs((picked[i] as number) - med);
+  dev.sort((a, b) => a - b);
+  const mad = dev[Math.floor(dev.length / 2)] as number;
+  const sigma = mad * 1.4826;
+
+  // MAD が 0（値がほぼ一定）のときは分位に任せる
+  const lo = picked[0] as number;
+  const hi = picked[picked.length - 1] as number;
+  if (!(sigma > 0)) return [lo, hi];
+  return [Math.max(lo, med - k * sigma), Math.min(hi, med + k * sigma)];
+}
+
+/** 被写体の外接矩形の高さ（画素）。奥行きとの比を見るのに使う。 */
+export function subjectBoxHeight(alpha: ArrayLike<number>, width: number, height: number): number {
+  let y0 = height;
+  let y1 = -1;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if ((alpha[y * width + x] as number) >= SUBJECT_THRESHOLD) {
+        if (y < y0) y0 = y;
+        if (y > y1) y1 = y;
+        break;
+      }
+    }
+  }
+  return y1 < 0 ? 0 : y1 - y0 + 1;
+}
+
+/**
+ * 局所的な起伏を強調する（アンシャープマスク）。
+ *
+ * 大域の形は平滑化した成分がそのまま持つので、比率は変わらない。
+ * 持ち上げるのは「平滑化からのずれ」＝顔の凹凸や服のしわだけ。
+ */
+export function enhanceRelief(
+  z: Float32Array,
+  alpha: ArrayLike<number>,
+  width: number,
+  height: number,
+  radius: number,
+  boost: number,
+): Float32Array {
+  if (boost <= 1 || radius < 1) return z;
+  const base = maskedBoxMean(z, alpha, width, height, Math.round(radius));
+  const out = new Float32Array(z.length);
+  for (let i = 0; i < z.length; i++) {
+    if ((alpha[i] as number) < SUBJECT_THRESHOLD) {
+      out[i] = z[i] as number;
+      continue;
+    }
+    const b = base[i] as number;
+    out[i] = b + ((z[i] as number) - b) * boost;
+  }
+  return out;
+}
+
+/**
  * 深度を較正して 0..65535 の正規化深度にする。
  *
  * 半球カバー（決定 D2）では絶対スケールは意味を持たない。重要なのは
@@ -244,32 +407,61 @@ export function solveAffine(
  */
 export function calibrate(input: CalibrationInput): CalibrationResult {
   const { raw, width, height, alpha, kind, focalPx } = input;
-  const ratio = input.depthToWidthRatio ?? DEFAULT_RATIO;
+  const boost = input.reliefBoost ?? DEFAULT_RELIEF_BOOST;
+  const reliefRadius = input.reliefRadius ?? DEFAULT_RELIEF_RADIUS;
 
   const shortSide = subjectShortSide(alpha, width, height);
   if (shortSide === 0) {
     throw new Error('被写体が見つかりません（α が閾値を超える画素がない）');
   }
+  const boxHeight = subjectBoxHeight(alpha, width, height) || shortSide;
 
-  // 半球カバー（決定 D2）では絶対スケールは意味を持たない。重要なのは
-  // 「被写体の奥行きが幅に対してどの程度あるか」という比だけで、それを直接指定する。
-  // 距離 1.0 にある被写体の実サイズは shortSide/focalPx。
-  const targetSpan = (shortSide / focalPx) * ratio;
+  // --- ① 外れ値を先に切る
+  //
+  // 髪やマットの染み出しは、被写体の 5% ほどの画素で深度の裾を長く伸ばす。
+  // その裾が奥行きの範囲を決めてしまうと、被写体の本体はそのごく一部に
+  // 押し込められ、平らに見える。実測では p95→p99.5 の裾だけで奥行きの
+  // 37% を占めていた。範囲を p1..p99 で取り、外はそこへ丸める。
+  const [q1, q50, q99] = percentileOfSubject(raw, alpha, [0.01, 0.5, 0.99]) as [
+    number, number, number,
+  ];
+  const [m1, m99] = robustRange(raw, alpha, 3);
+  // 分位と MAD の**厳しいほう**を採る。外れ値が 1% を超えると分位は
+  // 外れ値の中に入ってしまい、そこだけでは切りきれない。
+  const clipLo = Math.max(q1, m1);
+  const clipHi = Math.min(q99, m99);
+  const clipped = new Float32Array(raw.length);
+  for (let i = 0; i < raw.length; i++) {
+    const v = raw[i] as number;
+    clipped[i] = Number.isFinite(v) ? Math.min(clipHi, Math.max(clipLo, v)) : q50;
+  }
 
-  const [p5, p50, p95] = percentileOfSubject(raw, alpha, [0.05, 0.5, 0.95]) as [number, number, number];
-
+  // --- ② 深度に直す
   let z: Float32Array;
   let shift = 0;
+  let metric = false;
 
   if (kind === 'depth') {
-    // DA3 系。スケールだけが不定なので線形に合わせる。
-    const span = Math.max(p95 - p5, 1e-9);
-    const scale = targetSpan / span;
-    z = new Float32Array(raw.length);
-    for (let i = 0; i < raw.length; i++) z[i] = ((raw[i] as number) - p50) * scale + 1.0;
+    if (input.depthToWidthRatio === undefined) {
+      // DA3 は実寸の深度を返す（intrinsics も一緒に返る）。素直にそれを使う。
+      // 比を決め打ちで引き伸ばすと、大域の形が人間の比率から外れる。
+      // 実測では 奥行き ÷ 高さ が 1.47 になり、髪が後ろへ長く尾を引いていた。
+      z = clipped;
+      metric = true;
+    } else {
+      const target = (shortSide / focalPx) * input.depthToWidthRatio;
+      const span = Math.max(q99 - q1, 1e-9);
+      const scale = target / span;
+      z = new Float32Array(raw.length);
+      for (let i = 0; i < raw.length; i++) z[i] = ((clipped[i] as number) - q50) * scale + 1.0;
+    }
   } else {
-    // V2 系。z = 1/(a·d + b) を2つの制約から閉形式で解く。
-    // 注意: 逆深度は「大きいほど手前」なので、深度としての順序は反転する。
+    // V2 系は逆深度で絶対スケールを持たない。比を指定するしかない。
+    const ratio = input.depthToWidthRatio ?? DEFAULT_RATIO;
+    const targetSpan = (shortSide / focalPx) * ratio;
+    const [p5, p50, p95] = percentileOfSubject(clipped, alpha, [0.05, 0.5, 0.95]) as [
+      number, number, number,
+    ];
     const solved = solveAffine(p5, p50, p95, targetSpan);
     if (!solved) {
       throw new Error(
@@ -280,13 +472,58 @@ export function calibrate(input: CalibrationInput): CalibrationResult {
     shift = solved.b;
     z = new Float32Array(raw.length);
     for (let i = 0; i < raw.length; i++) {
-      const den = solved.a * (raw[i] as number) + solved.b;
+      const den = solved.a * (clipped[i] as number) + solved.b;
       z[i] = den > 1e-6 ? 1 / den : 0;
     }
   }
 
-  // 被写体領域の実際の値域を測って 0..65535 に写す。
-  const [zLo, zHi] = percentileOfSubject(z, alpha, [0.005, 0.995]) as [number, number];
+  // --- ③ 局所の起伏を持ち上げる
+  //
+  // 大域の形は平滑化した成分が持つので比率は変わらず、上がるのは
+  // 顔の凹凸や服のしわだけ。
+  const radius = Math.max(1, Math.round(shortSide * reliefRadius));
+  z = enhanceRelief(z, alpha, width, height, radius, boost);
+
+  // 強調は「平滑化からのずれ」を倍にするので、切り残した外れ値も倍になる。
+  // クリップの縁に張り付いた画素が、強調後に大きく飛び出す。もう一度
+  // 頑健な範囲で抑える（自分のテストで、外れ値が奥行きを 12.7 倍に
+  // 広げているのを見つけた）。
+  if (boost > 1) {
+    const [bLo, bHi] = robustRange(z, alpha, 3);
+    for (let i = 0; i < z.length; i++) {
+      const v = z[i] as number;
+      z[i] = v < bLo ? bLo : v > bHi ? bHi : v;
+    }
+  }
+
+  // --- ④ 実寸が当てにならないときだけ引き戻す
+  //
+  // 局所強調の**後**に行う。強調は奥行きの幅も少し広げるので、先に
+  // クランプしても最後には範囲を超えてしまう（自分のテストで見つけた）。
+  //
+  // 効かせるのは**実寸経路だけ**。depthToWidthRatio が渡されている
+  // ときは、呼び出し側が奥行きを明示していて、②で目標幅ぴったりに
+  // 引き伸ばし済み。そこへこのクランプを重ねると、比を上げても
+  // 上限 0.9 で頭打ちになり、立体感スライダが効かなくなる。
+  const medianZ = percentileOfSubject(z, alpha, [0.5])[0] as number;
+  const worldHeight = (boxHeight / focalPx) * Math.max(medianZ, 1e-6);
+  let [lo, hi] = percentileOfSubject(z, alpha, [0.0, 1.0]) as [number, number];
+  const ratioNow = worldHeight > 0 ? (hi - lo) / worldHeight : 0;
+
+  if (metric && ratioNow > 0) {
+    const clampedRatio = Math.min(
+      PLAUSIBLE_DEPTH_TO_HEIGHT.max,
+      Math.max(PLAUSIBLE_DEPTH_TO_HEIGHT.min, ratioNow),
+    );
+    if (clampedRatio !== ratioNow) {
+      const k = clampedRatio / ratioNow;
+      for (let i = 0; i < z.length; i++) z[i] = ((z[i] as number) - medianZ) * k + medianZ;
+      [lo, hi] = percentileOfSubject(z, alpha, [0.0, 1.0]) as [number, number];
+    }
+  }
+
+  // --- ⑤ 0..65535 に写す
+  const [zLo, zHi] = percentileOfSubject(z, alpha, [0.0, 1.0]) as [number, number];
   const nearZ = Math.min(zLo, zHi);
   const farZ = Math.max(zLo, zHi);
   const span = Math.max(farZ - nearZ, 1e-9);
@@ -296,7 +533,15 @@ export function calibrate(input: CalibrationInput): CalibrationResult {
     const t = ((z[i] as number) - nearZ) / span;
     depth[i] = Math.max(0, Math.min(65535, Math.round(t * 65535)));
   }
-  return { depth, nearZ, farZ, shift, silhouetteSamples: 0 };
+  return {
+    depth,
+    nearZ,
+    farZ,
+    shift,
+    silhouetteSamples: 0,
+    metric,
+    depthToHeight: worldHeight > 0 ? span / worldHeight : 0,
+  };
 }
 
 /**
