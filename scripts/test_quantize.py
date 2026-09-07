@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""量子化の自己テスト。小さなモデルを作って、実際に読めるかまで見る。
+"""量子化と較正の自己テスト。小さなモデルを作って、実際に読めるかまで見る。
 
 本物のモデルは数百 MB あり、CI で回すと数分かかる。壊れ方の多くは
 グラフの型の食い違いなので、**同じ形をした小さなモデル**で再現できる。
@@ -13,6 +13,9 @@
   ・その修復で挿す Cast の名前が、周回ごとに 0 から振り直されて
     重複する（two nodes with same node name）。1ブロックのモデルでは
     1周で収まるので見逃した。ここではブロックを重ねて何周も回させる。
+  ・Depth Anything 3 は多視点モデルで、入力が [batch, views, 3, H, W] の
+    5階になる。NCHW を決め打ちで渡すと onnxruntime が弾く
+    （Invalid rank for input: pixel_values Got: 4 Expected: 5）。
 """
 from __future__ import annotations
 
@@ -70,6 +73,47 @@ def attention_like(path: Path, dim: int = 32, blocks: int = 4) -> None:
     )
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
     onnx.save(onnx.shape_inference.infer_shapes(model), str(path))
+
+
+def da3_like(path: Path, size: int = 16) -> None:
+    """Depth Anything 3 と同じ形。入力が 5 階、出力に視点軸が付く。"""
+    axes = numpy_helper.from_array(np.array([2], dtype=np.int64), "axes")
+    graph = helper.make_graph(
+        [helper.make_node("ReduceMean", ["pixel_values", "axes"], ["depth"], keepdims=0)],
+        "da3_like",
+        [helper.make_tensor_value_info("pixel_values", TensorProto.FLOAT, [1, 1, 3, size, size])],
+        [helper.make_tensor_value_info("depth", TensorProto.FLOAT, [1, 1, size, size])],
+        [axes],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 18)])
+    onnx.save(model, str(path))
+
+
+def check_rank_handling(d: Path) -> bool:
+    """多視点モデル（5階入力）に NCHW を渡しても通ることを見る。
+
+    較正はここで落ちた。本物のモデルを 300 MB 落としてからでは遅い。
+    """
+    import calibrate as cal
+
+    src = d / "da3like.onnx"
+    da3_like(src)
+    sess = ort.InferenceSession(str(src), providers=["CPUExecutionProvider"])
+    x = np.random.default_rng(2).random((1, 3, 16, 16)).astype(np.float32)
+
+    ok = True
+    try:
+        sess.run(None, {"pixel_values": x})
+        ok &= check("5階モデルに NCHW を直接渡すと落ちる（前提の確認）", False, "落ちなかった")
+    except Exception:
+        ok &= check("5階モデルに NCHW を直接渡すと落ちる（前提の確認）", True)
+
+    try:
+        out = cal.run(sess, x)
+        ok &= check("較正が5階モデルを扱える", out.ndim == 3, f"出力の階数 {out.ndim}")
+    except Exception as e:
+        ok &= check("較正が5階モデルを扱える", False, str(e)[:200])
+    return ok
 
 
 def check(name: str, ok: bool, detail: str = "") -> bool:
@@ -150,12 +194,14 @@ def main() -> int:
                 floor = 0.5 if mode == "q4f16" else 0.99
                 passed &= check(f"{mode}: fp32 と相関 {corr:.4f}", corr > floor)
 
+        passed &= check_rank_handling(d)
+
         # 壊れたファイルを見逃さないこと
         bad = d / "broken.onnx"
         bad.write_bytes(b"not an onnx file")
         passed &= check("壊れたファイルを検出できる", q.verify_loadable(bad) is not None)
 
-    print("量子化の自己テスト:", "合格" if passed else "不合格")
+    print("量子化と較正の自己テスト:", "合格" if passed else "不合格")
     return 0 if passed else 1
 
 

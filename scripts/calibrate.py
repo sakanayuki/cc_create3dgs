@@ -41,13 +41,37 @@ def load_images(dir_: Path, size: tuple[int, int], limit: int | None = None) -> 
     return out
 
 
+def fit_rank(x: np.ndarray, expected_rank: int) -> np.ndarray:
+    """NCHW の配列を、モデルが求める階数に合わせる。
+
+    Depth Anything 3 は**多視点モデル**で、入力が `[batch, views, 3, H, W]` の
+    5 階になる（1枚だけ渡すときは views=1）。NCHW を決め打ちで渡すと
+    onnxruntime が弾く。
+
+        Invalid rank for input: pixel_values Got: 4 Expected: 5
+
+    足りなければバッチ軸の後ろに 1 を挿し、多ければ先頭の 1 を削る。
+    """
+    while x.ndim < expected_rank:
+        x = x[:, None]
+    while x.ndim > expected_rank and x.shape[0] == 1:
+        x = x[0]
+    return x
+
+
 def run(sess: ort.InferenceSession, x: np.ndarray) -> np.ndarray:
-    name = sess.get_inputs()[0].name
     inp = sess.get_inputs()[0]
     # 入力が fp16 のモデルにも対応する
     dtype = np.float16 if "float16" in str(inp.type) else np.float32
-    out = sess.run(None, {name: x.astype(dtype)})[0]
-    return np.asarray(out, dtype=np.float32)
+    shape = inp.shape or []
+    if shape:
+        x = fit_rank(x, len(shape))
+    out = sess.run(None, {inp.name: x.astype(dtype)})[0]
+    out = np.asarray(out, dtype=np.float32)
+    # 出力も視点軸を持つ（[batch, views, H, W]）。比較しやすいよう畳んでおく。
+    while out.ndim > 3 and out.shape[0] == 1:
+        out = out[0]
+    return out
 
 
 def normalize01(a: np.ndarray) -> np.ndarray:

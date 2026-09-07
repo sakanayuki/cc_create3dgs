@@ -83,6 +83,12 @@ extrinsics      [1,1,3,4]       intrinsics [1,1,3,3]
 `intrinsics` は `[fx 0 cx; 0 fy cy; 0 0 1]` の形で、実測値から `fx = fy ≈ 702.8`、
 `cx = cy ≈ 259 = 518/2` と読める。**焦点距離が直接得られるので、EXIF も画角55°の仮定も不要**。
 
+> **入力の階数に注意（v2.2 で判明）。** DA3 は**多視点モデル**なので、入力 `pixel_values` は
+> `[batch, views, 3, H, W]` の **5階**である（1枚だけ渡すときは `views=1`）。NCHW を決め打ちで
+> 渡すと onnxruntime が `Invalid rank for input: pixel_values Got: 4 Expected: 5` で弾く。
+> 出力に `[1, 1, ...]` という接頭辞が付くのも同じ理由（batch と views）。
+> 実装では宣言された階数から形を組み立てる（`inputDims`）。
+
 さらに `confidence` は設計に無かった収穫で、信頼度の低い画素の深度を捨てる判断に使える
 （マットの縁や、テクスチャの無い平坦部で深度が当てにならない箇所）。
 

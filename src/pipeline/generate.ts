@@ -103,6 +103,38 @@ function feedOf(session: ort.InferenceSession, tensor: ort.Tensor): Record<strin
   return { [name]: tensor };
 }
 
+/**
+ * モデルが求める階数に合わせて入力の形を決める。
+ *
+ * NCHW を決め打ちにしてはいけない。**Depth Anything 3 は多視点モデル**で、
+ * 入力が `[batch, views, 3, H, W]` の5階になる（1枚だけ渡すときは views=1）。
+ * 4階で渡すと onnxruntime が弾く。
+ *
+ *     Invalid rank for input: pixel_values Got: 4 Expected: 5
+ *
+ * 宣言された階数が読めなければ NCHW を仮定する。
+ */
+export function inputDims(
+  declaredRank: number | undefined,
+  channels: number,
+  height: number,
+  width: number,
+): number[] {
+  const nchw = [1, channels, height, width];
+  if (!declaredRank || declaredRank === 4) return nchw;
+  if (declaredRank === 3) return [channels, height, width];
+  // 5階以上は、バッチと空間次元の間に視点などの軸が挟まる。1 で埋める。
+  return [1, ...Array(declaredRank - 4).fill(1), channels, height, width];
+}
+
+/** セッションの入力宣言から階数を読む。取れなければ undefined。 */
+function declaredRank(session: ort.InferenceSession): number | undefined {
+  const meta = (session as unknown as Record<string, unknown>)['inputMetadata'];
+  if (!Array.isArray(meta) || meta.length === 0) return undefined;
+  const first = meta[0] as { shape?: readonly unknown[] } | undefined;
+  return Array.isArray(first?.shape) ? first.shape.length : undefined;
+}
+
 /** 名前に部分一致する出力を探す。無ければ最初の出力。 */
 function pickOutput(
   outputs: ort.InferenceSession.OnnxValueMapType,
@@ -147,7 +179,8 @@ async function runMatte(
 
   const small = resizeRgba(rgba, grid, grid, size, size);
   const input = toTensorNCHW(small, size, size, { mean: [0.5, 0.5, 0.5], std: [0.5, 0.5, 0.5] });
-  const out = await session.run(feedOf(session, new ort.Tensor('float32', input, [1, 3, size, size])));
+  const dims = inputDims(declaredRank(session), 3, size, size);
+  const out = await session.run(feedOf(session, new ort.Tensor('float32', input, dims)));
   const t = pickOutput(out, session, 'matte', 'alpha', 'output');
   const raw = t.data as unknown as Float32Array;
 
@@ -193,7 +226,9 @@ async function runDepth(
 
   const small = resizeRgba(rgba, grid, grid, size, size);
   const input = toTensorNCHW(small, size, size, { mean: IMAGENET_MEAN, std: IMAGENET_STD });
-  const out = await session.run(feedOf(session, new ort.Tensor('float32', input, [1, 3, size, size])));
+  // DA3 は [batch, views, 3, H, W] の5階を取る。決め打ちにしない。
+  const dims = inputDims(declaredRank(session), 3, size, size);
+  const out = await session.run(feedOf(session, new ort.Tensor('float32', input, dims)));
 
   const depthTensor = pickOutput(out, session, 'predicted_depth', 'depth', 'output');
   const raw = depthTensor.data as unknown as Float32Array;
@@ -259,8 +294,9 @@ async function runInpaint(
 
     const feeds: Record<string, ort.Tensor> = {};
     const names = session.inputNames;
-    feeds[names[0] as string] = new ort.Tensor('uint8', image, [1, 3, size, size]);
-    if (names[1]) feeds[names[1]] = new ort.Tensor('uint8', maskTensor, [1, 1, size, size]);
+    const rank = declaredRank(session);
+    feeds[names[0] as string] = new ort.Tensor('uint8', image, inputDims(rank, 3, size, size));
+    if (names[1]) feeds[names[1]] = new ort.Tensor('uint8', maskTensor, inputDims(rank, 1, size, size));
 
     const out = await session.run(feeds);
     const t = pickOutput(out, session, 'output', 'result');
