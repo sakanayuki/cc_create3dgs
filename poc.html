@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>PhotoSplat PoC-1 — 実機検証</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700&family=IBM+Plex+Mono:wght@400;600&display=swap">
+<style>
+:root{
+  color-scheme: light dark;
+  --bg:#F4F7F6; --surface:#fff; --surface-2:#E9EFEE; --ink:#101817; --ink-2:#475856; --ink-3:#758785;
+  --line:#D6E2E0; --accent:#00786C; --accent-soft:#DCF0ED;
+  --ok:#286B3C; --ok-soft:#E0F0E5; --ng:#9E2B23; --ng-soft:#F9E3E1; --warn:#8F4B08; --warn-soft:#F8E9D8;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#0D1413; --surface:#141D1C; --surface-2:#1C2726; --ink:#E7EFED; --ink-2:#A0B2AF; --ink-3:#748784;
+    --line:#253433; --accent:#3DBDB0; --accent-soft:#0F2B28;
+    --ok:#7CC28E; --ok-soft:#142A1B; --ng:#E08A80; --ng-soft:#2E1A18; --warn:#DFA063; --warn-soft:#2C2118;
+  }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font-family:"Zen Kaku Gothic New","Hiragino Sans",system-ui,sans-serif;font-size:15px;line-height:1.8;
+  padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  -webkit-text-size-adjust:100%}
+.wrap{max-width:820px;margin:0 auto;padding:20px 16px 72px}
+h1{font-size:21px;margin:0 0 4px;letter-spacing:.01em}
+.sub{color:var(--ink-2);font-size:13.5px;margin:0 0 22px}
+h2{font-size:15px;margin:30px 0 10px;padding-bottom:8px;border-bottom:2px solid var(--ink);letter-spacing:.02em}
+.mono{font-family:"IBM Plex Mono",ui-monospace,monospace;font-variant-numeric:tabular-nums}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:0 0 12px}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.grow{flex:1;min-width:0}
+button{font:inherit;font-weight:700;font-size:14px;border:1px solid var(--accent);background:var(--accent);color:#fff;
+  padding:11px 16px;border-radius:9px;cursor:pointer;min-height:44px;touch-action:manipulation}
+button.ghost{background:transparent;color:var(--accent)}
+button:disabled{opacity:.45;cursor:default}
+button:active{transform:translateY(1px)}
+.k{color:var(--ink-3);font-size:12.5px}
+.v{font-family:"IBM Plex Mono",monospace;font-variant-numeric:tabular-nums;font-weight:600}
+pre{background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:12px;
+  font-family:"IBM Plex Mono",monospace;font-size:11.5px;line-height:1.6;overflow-x:auto;white-space:pre;margin:0}
+.pill{display:inline-block;font-family:"IBM Plex Mono",monospace;font-size:11px;font-weight:600;
+  padding:2px 8px;border-radius:99px;white-space:nowrap}
+.pill.ok{background:var(--ok-soft);color:var(--ok)}
+.pill.ng{background:var(--ng-soft);color:var(--ng)}
+.pill.run{background:var(--warn-soft);color:var(--warn)}
+.pill.idle{background:var(--surface-2);color:var(--ink-3)}
+.item{border-bottom:1px solid var(--line);padding:12px 0}
+.item:last-child{border-bottom:none}
+.item .name{font-weight:700;font-size:14px}
+.item .note{color:var(--ink-3);font-size:12.5px;line-height:1.65;margin-top:3px}
+.item .res{margin-top:8px;font-size:12.5px;color:var(--ink-2)}
+.bar{height:4px;background:var(--surface-2);border-radius:99px;overflow:hidden;margin-top:8px}
+.bar i{display:block;height:100%;background:var(--accent);width:0;transition:width .15s}
+canvas{width:100%;max-width:360px;aspect-ratio:1;background:var(--surface-2);border-radius:10px;display:block;border:1px solid var(--line)}
+.warn{background:var(--warn-soft);border-color:color-mix(in srgb,var(--warn) 25%,transparent)}
+.warn b{color:var(--warn)}
+label{display:flex;gap:8px;align-items:center;font-size:13.5px;color:var(--ink-2)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>PhotoSplat PoC-1 — 実機検証</h1>
+  <p class="sub">
+    このページは設計の前提を確かめるための診断ツールです。<strong>お使いのスマートフォンで開いて</strong>実行し、
+    最後の結果をコピーして共有してください。判定するのは3つ:
+    <b>R1</b> ONNX Runtime の WebGPU が動くか / <b>R10</b> Depth Anything 3 が動くか /
+    <b>R12</b> 42万サーフェルで 60fps が出るか。
+  </p>
+
+  <div class="card warn">
+    <b>通信量にご注意ください。</b> モデルは HuggingFace から直接ダウンロードします。
+    全部実行すると <b>約 320 MB</b> です。Wi-Fi 環境での実行をおすすめします。
+    一度落としたものは端末内にキャッシュされ、2回目以降は再ダウンロードしません。
+  </div>
+
+  <h2>① 端末の能力</h2>
+  <div class="card" id="cap"><span class="k">判定中…</span></div>
+
+  <h2>② モデルの読み込みと推論</h2>
+  <div class="card">
+    <div class="row" style="margin-bottom:6px">
+      <label><input type="checkbox" id="useWasm"> WASM でも試す（遅いので既定はオフ）</label>
+    </div>
+    <div class="row">
+      <button id="runDepth">深度モデルだけ実行（約 200 MB）</button>
+      <button id="runAll" class="ghost">全部実行（約 320 MB）</button>
+    </div>
+  </div>
+  <div class="card" id="models"></div>
+
+  <h2>③ 描画ベンチ（R12）</h2>
+  <div class="card">
+    <p class="k" style="margin:0 0 10px">
+      手続き的に作ったサーフェルを回して、フレーム時間の中央値を測ります。ダウンロードは発生しません。
+      標準プリセットの 42万で 60fps（16.6ms）に収まるかが判断点です。
+    </p>
+    <div class="row"><button id="runRender">描画ベンチを実行</button></div>
+    <div class="bar" id="renderBar"><i></i></div>
+    <div id="renderOut" class="res" style="margin-top:10px"></div>
+    <canvas id="cv" width="720" height="720"></canvas>
+  </div>
+
+  <h2>④ 結果</h2>
+  <div class="card">
+    <div class="row" style="margin-bottom:10px">
+      <button id="copy">結果をコピー</button>
+      <button id="clearCache" class="ghost">モデルキャッシュを消す</button>
+    </div>
+    <pre id="out">まだ実行していません。</pre>
+  </div>
+</div>
+<script type="module" src="/src/poc/main.ts"></script>
+</body>
+</html>

@@ -1,0 +1,30 @@
+name: budget
+
+# 性能バジェットの監視。じわじわ増えるのを早めに気づけるよう warn / fail の2段構え。
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  check:
+    name: サイズと品質のバジェット
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22', cache: npm }
+      - run: npm ci
+      - run: node scripts/copy_ort.mjs
+
+      # モデルはここでは取得しない。PR で見たいのはアプリ側の増分なので、
+      # モデルサイズは registry.json の expectedBytes をそのまま信じる。
+      - name: ビルド
+        env:
+          PAGES_BASE: /${{ github.event.repository.name }}/
+        run: npm run build
+
+      - name: バジェット判定
+        run: node scripts/budget_check.mjs --dist dist --fail

@@ -1,0 +1,50 @@
+name: quantize
+
+# 量子化設定を変えた PR に対して、精度がどう変わったかを自動でコメントする。
+# excludeOpTypes のような「試して測るしかない」設定を数値を見ながら詰めるための仕組み。
+on:
+  pull_request:
+    paths:
+      - 'models/registry.json'
+      - 'scripts/quantize.py'
+      - 'scripts/_registry.py'
+      - 'models/calibration/**'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  diff:
+    name: 量子化の精度差分
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11', cache: pip }
+      - run: pip install -q -r scripts/requirements.txt
+
+      - name: base 側と head 側の両方で量子化して比較
+        run: |
+          git worktree add /tmp/base ${{ github.event.pull_request.base.sha }}
+          python scripts/fetch_models.py --out /tmp/raw
+          python /tmp/base/scripts/quantize.py --in /tmp/raw --out /tmp/out-base \
+                 --registry /tmp/base/models/registry.json
+          python scripts/quantize.py          --in /tmp/raw --out /tmp/out-head
+          python scripts/calibrate.py --compare /tmp/out-base /tmp/out-head \
+                 --report /tmp/report.md
+
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('/tmp/report.md', 'utf8');
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const marker = '<!-- quantize-report -->';
+            const list = await github.rest.issues.listComments({ owner, repo, issue_number });
+            const mine = list.data.find(c => c.body?.includes(marker));
+            const payload = `${marker}\n${body}`;
+            if (mine) await github.rest.issues.updateComment({ owner, repo, comment_id: mine.id, body: payload });
+            else await github.rest.issues.createComment({ owner, repo, issue_number, body: payload });

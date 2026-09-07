@@ -1,0 +1,43 @@
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  unit:
+    name: 型検査と単体テスト
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22', cache: npm }
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  e2e:
+    name: E2E（headless Chrome + WebGPU）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22', cache: npm }
+      - run: npm ci
+      - run: node scripts/copy_ort.mjs
+      - run: npx playwright install --with-deps chromium
+
+      # ランナーに GPU は無く SwiftShader で動く。実機の 20〜50 倍遅いので、
+      # ここで検証するのは「結果の正しさ」だけで、速度は一切見ない（docs/07 §7.4）。
+      - name: E2E 実行
+        run: npm run test:e2e
+        env:
+          PW_WEBGPU: '1'
+
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-results
+          path: tests/results
+          if-no-files-found: ignore

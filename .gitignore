@@ -1,6 +1,19 @@
 node_modules/
 dist/
 build/
-# モデルバイナリはコミットしない（決定 D7 / docs/01-requirements.md §1.5）
+.vite/
+
+# --- 生成物: コミットしない（決定 D7 / docs/01 §1.5） ---
+# モデルは CI が取得・量子化して Pages 成果物に同梱する
 public/models/
+# ONNX Runtime の wasm は scripts/copy_ort.mjs が node_modules から複製する
+public/ort/
 *.onnx
+*.onnx_data
+
+# 実測ログの作業ファイル
+scratch/
+
+# テスト実行成果物（トレース・スクリーンショット）
+tests/results/
+playwright-report/

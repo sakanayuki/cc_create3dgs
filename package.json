@@ -1,0 +1,28 @@
+{
+  "name": "photosplat",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "単一写真からブラウザ内で軽量3DGSを生成するWebアプリ",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "budget": "node scripts/budget_check.mjs --dist dist",
+    "test:e2e": "playwright test",
+    "test:all": "npm run typecheck && npm test && npm run test:e2e"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "@webgpu/types": "^0.1.72",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.11",
+    "vitest": "^3.0.5"
+  },
+  "dependencies": {
+    "onnxruntime-web": "^1.22.0"
+  }
+}

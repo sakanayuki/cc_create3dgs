@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>PhotoSplat</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700&family=IBM+Plex+Mono:wght@400;600&display=swap">
+<style>
+:root{
+  color-scheme: light dark;
+  --bg:#F4F7F6; --surface:#fff; --surface-2:#E9EFEE; --ink:#101817; --ink-2:#475856; --ink-3:#758785;
+  --line:#D6E2E0; --accent:#00786C; --accent-soft:#DCF0ED; --warn:#8F4B08; --warn-soft:#F8E9D8;
+}
+@media (prefers-color-scheme: dark){
+  :root{ --bg:#0D1413; --surface:#141D1C; --surface-2:#1C2726; --ink:#E7EFED; --ink-2:#A0B2AF; --ink-3:#748784;
+    --line:#253433; --accent:#3DBDB0; --accent-soft:#0F2B28; --warn:#DFA063; --warn-soft:#2C2118; }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font-family:"Zen Kaku Gothic New","Hiragino Sans",system-ui,sans-serif;font-size:15px;line-height:1.85;
+  padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
+.wrap{max-width:720px;margin:0 auto;padding:40px 18px 80px}
+h1{font-size:30px;margin:0 0 8px;letter-spacing:.01em}
+h1 .en{display:block;font-family:"IBM Plex Mono",monospace;font-size:14px;font-weight:600;color:var(--accent);letter-spacing:.02em;margin-bottom:6px}
+.lede{color:var(--ink-2);margin:0 0 28px}
+h2{font-size:15px;margin:32px 0 12px;padding-bottom:8px;border-bottom:2px solid var(--ink)}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:11px;padding:18px 20px;margin:0 0 12px}
+.card.accent{border-left:3px solid var(--accent)}
+.card.warn{background:var(--warn-soft);border-color:color-mix(in srgb,var(--warn) 25%,transparent)}
+.card h3{margin:0 0 6px;font-size:15px}
+.card p{margin:0;color:var(--ink-2);font-size:13.5px;line-height:1.75}
+a.btn{display:inline-flex;align-items:center;gap:8px;font-weight:700;font-size:14.5px;text-decoration:none;
+  background:var(--accent);color:#fff;padding:12px 18px;border-radius:9px;min-height:44px;margin-top:12px}
+a.btn.ghost{background:transparent;color:var(--accent);border:1px solid var(--accent)}
+ul{margin:8px 0 0;padding-left:1.2em;color:var(--ink-2);font-size:13.5px}
+li{margin:4px 0}
+code{font-family:"IBM Plex Mono",monospace;font-size:.88em;background:var(--surface-2);padding:.1em .38em;border-radius:4px}
+.mono{font-family:"IBM Plex Mono",monospace;font-variant-numeric:tabular-nums}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-top:6px}
+.stat{background:var(--surface-2);border-radius:9px;padding:11px 13px}
+.stat .k{font-size:11.5px;color:var(--ink-3);display:block}
+.stat .v{font-family:"IBM Plex Mono",monospace;font-weight:600;font-size:16px}
+footer{margin-top:40px;color:var(--ink-3);font-size:12.5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1><span class="en">PhotoSplat</span>単一写真から、スマホの中だけで軽量3DGSをつくる</h1>
+  <p class="lede">
+    写真を1枚選ぶと、ブラウザの中だけで 3D Gaussian Splatting を組み立て、その場で回して見て、
+    ファイルとして持ち帰れる。写真は端末から一歩も出ない。
+  </p>
+
+  <div class="grid">
+    <div class="stat"><span class="k">作業グリッド</span><span class="v">1024²</span></div>
+    <div class="stat"><span class="k">ガウシアン</span><span class="v">424,000</span></div>
+    <div class="stat"><span class="k">出力</span><span class="v">750 KB</span></div>
+    <div class="stat"><span class="k">生成</span><span class="v">7.2 s</span></div>
+  </div>
+
+  <h2>いまの状態</h2>
+  <div class="card warn">
+    <h3>生成パイプラインは実装中です</h3>
+    <p>
+      設計（v2）は確定し、土台・CI・描画レンダラ・実機検証ハーネスまで実装済みです。
+      ただし設計自身が「<strong>PoC-1 の結果が出るまで本実装に入らない</strong>」と定めているため、
+      写真から生成する機能はまだ有効になっていません。PoC-1 が通れば残りを実装します。
+    </p>
+  </div>
+
+  <div class="card accent">
+    <h3>PoC-1 を実機で実行してください</h3>
+    <p>
+      設計全体が成立するかを決める検証です。<strong>このページをスマートフォンで開いて</strong>実行し、
+      結果をコピーして共有してください。判定するのは、ONNX Runtime の WebGPU が iOS Safari / Android Chrome で
+      動くか（R1）、Depth Anything 3 が動くか（R10）、42万サーフェルで 60fps が出るか（R12）の3点です。
+    </p>
+    <a class="btn" href="./poc.html">PoC-1 を開く →</a>
+  </div>
+
+  <h2>設計</h2>
+  <div class="card">
+    <p>
+      設計書はリポジトリの <code>docs/</code> に8本あります。軽量化の中核は
+      「単一画像由来のガウシアンは元から2Dピクセル格子に乗っているので、
+      一般の3DGS圧縮が数秒かける属性の並べ替えが構造的に不要になる」という点で、
+      これにより vanilla PLY 比 約350倍、ガウシアン1個あたり実効1.8バイトに収まります。
+    </p>
+    <ul>
+      <li><code>01-requirements.md</code> — 要件と決定 D1〜D18、改訂履歴</li>
+      <li><code>04-compression.md</code> — 軽量化の4階層とビット割当</li>
+      <li><code>08-risks.md</code> — リスクと PoC 計画</li>
+    </ul>
+  </div>
+
+  <footer>
+    生成処理はすべて端末内で完結します。写真がネットワークに送信されることはありません。
+  </footer>
+</div>
+<script type="module" src="/src/main.ts"></script>
+</body>
+</html>

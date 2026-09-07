@@ -1,0 +1,135 @@
+name: deploy
+
+# GitHub Actions 経由で GitHub Pages に反映する（本プロジェクトの技術要件）。
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      models:
+        description: 'モデルの扱い: full=取得して量子化 / skip=アプリのみ配信（PoC-1 は HF から直接取得するので skip でも動く）'
+        type: choice
+        options: [full, skip]
+        default: full
+      profile:
+        description: 'モデルプロファイル（models/registry.json）'
+        type: choice
+        options: [permissive, research]
+        default: permissive
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Pages のデプロイは直列化する。連続 push での競合を防ぐ。
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  MODELS_MODE: ${{ inputs.models || 'full' }}
+  PROFILE: ${{ inputs.profile || 'permissive' }}
+
+jobs:
+  models:
+    name: モデルの取得と量子化
+    runs-on: ubuntu-latest
+    outputs:
+      cache-key: ${{ steps.key.outputs.value }}
+      skipped: ${{ steps.key.outputs.skipped }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # 量子化結果は「レジストリ + 量子化スクリプト + 較正データ」だけで決まる。
+      # このハッシュが変わらなければ再量子化は不要（docs/07 §7.2）。
+      - id: key
+        run: |
+          if [ "$MODELS_MODE" = "skip" ]; then
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+            echo "value=skip" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          H=$(cat models/registry.json scripts/quantize.py scripts/_registry.py \
+                  models/calibration/*.jpg 2>/dev/null | sha256sum | cut -c1-16)
+          echo "skipped=false" >> "$GITHUB_OUTPUT"
+          echo "value=models-$PROFILE-$H" >> "$GITHUB_OUTPUT"
+
+      - if: steps.key.outputs.skipped != 'true'
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: build/models
+          key: ${{ steps.key.outputs.value }}
+
+      - if: steps.key.outputs.skipped != 'true' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - if: steps.key.outputs.skipped != 'true' && steps.cache.outputs.cache-hit != 'true'
+        name: 取得・量子化・較正
+        run: |
+          pip install -q -r scripts/requirements.txt
+          python scripts/fetch_models.py  --out build/raw    --profile "$PROFILE"
+          python scripts/quantize.py      --in  build/raw --out build/models --profile "$PROFILE"
+          python scripts/calibrate.py     --raw build/raw --models build/models \
+                                          --report calibration-report.md --fail-under-threshold
+
+      - if: steps.key.outputs.skipped != 'true' && steps.cache.outputs.cache-hit != 'true'
+        name: 較正レポートをジョブ要約に出す
+        run: cat calibration-report.md >> "$GITHUB_STEP_SUMMARY" || true
+
+      - if: steps.key.outputs.skipped != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: models
+          path: build/models
+          if-no-files-found: error
+
+  build:
+    name: ビルドとバジェット検証
+    needs: models
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - if: needs.models.outputs.skipped != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: models
+          path: public/models
+
+      # ORT の wasm を同一オリジンで配るために複製する（決定 D7）
+      - run: node scripts/copy_ort.mjs
+
+      - name: ビルド
+        env:
+          # Pages は https://<user>.github.io/<repo>/ に配信される
+          PAGES_BASE: /${{ github.event.repository.name }}/
+        run: npm run build
+
+      - name: 性能バジェット
+        run: node scripts/budget_check.mjs --dist dist --fail
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    name: Pages へデプロイ
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

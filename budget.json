@@ -1,0 +1,41 @@
+{
+  "_comment": [
+    "性能バジェット（docs/07 §7.5）。すべて標準プリセットに対する値。",
+    "warn は PR にコメントするだけ、fail は CI を落とす。",
+    "時間に関する指標はここに無い。GitHub ランナーには GPU が無く、SwiftShader で",
+    "測った時間は実機について何も語らないため（docs/07 §7.5）。実機計測は",
+    "?bench=1 で行い docs/measurements.md に記録する。"
+  ],
+
+  "bundle": {
+    "js.gzip":  { "warn": 280000, "fail": 400000 },
+    "css.gzip": { "warn": 15000,  "fail": 25000 }
+  },
+
+  "runtime": {
+    "_comment": "ONNX Runtime Web の wasm。設計 v2 の見積もりに入っていなかった実装上の発見。gzip 後で測る。",
+    "ort.wasm.gzip": { "warn": 7000000, "fail": 9000000 }
+  },
+
+  "models": {
+    "firstVisit.person": { "warn": 36600000, "fail": 42000000 },
+    "objectMode.extra":  { "warn": 44100000, "fail": 50000000 },
+    "total":             { "warn": 85000000, "fail": 100000000 }
+  },
+
+  "pages": {
+    "totalUncompressed": { "warn": 200000000, "fail": 400000000 }
+  },
+
+  "output": {
+    "_comment": "e2e テストが tests/results/metrics.json に書いた値を見る。無ければスキップ。",
+    "pgs.bytes":     { "warn": 800000, "fail": 1000000 },
+    "gaussianCount": { "warnRange": [300000, 500000], "failRange": [250000, 600000] }
+  },
+
+  "quality": {
+    "ssim.inputView":   { "warnMin": 0.93, "failMin": 0.92 },
+    "holeRatio.45deg":  { "warn": 0.01, "fail": 0.02 },
+    "stripeGain.45deg": { "warnMin": 0.4, "failMin": 0.3 }
+  }
+}
