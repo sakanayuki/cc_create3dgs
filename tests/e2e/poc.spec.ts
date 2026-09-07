@@ -57,7 +57,10 @@ test.describe('PoC-1 ハーネス', () => {
   test('描画ベンチ（WebGPU があるときのみ実測）', async ({ page }) => {
     // CI はソフトウェア実装で実機の20〜50倍遅い。ここで見るのは「壊れていないこと」だけで、
     // 速度は見ない（docs/07 §7.4）。実機の数値は poc.html を直接開いて測る。
-    await page.goto('/poc.html?frames=8&counts=20000,424000');
+    // ソフトウェア実装では 42万サーフェルの1フレームに数十秒かかる。ここで見るのは
+    // 「レンダラが動き、背面カリングが効いていること」だけなので規模を落とす。
+    // 実機の 42万での fps は poc.html を直接開いて測る（R12）。
+    await page.goto('/poc.html?frames=6&counts=20000,60000');
     await expect(page.locator('#cap .pill')).toBeVisible({ timeout: 30_000 });
 
     const hasWebGpu = await page.evaluate(async () => {
@@ -81,24 +84,41 @@ test.describe('PoC-1 ハーネス', () => {
     }
 
     await page.locator('#runRender').click();
-    await expect(page.locator('#renderOut .pill')).toHaveCount(2, { timeout: 8 * 60 * 1000 });
 
-    const results = (await page.evaluate(() => {
-      const pre = document.getElementById('out');
-      return pre ? JSON.parse(pre.textContent ?? '{}') : {};
-    })) as Record<string, unknown>;
+    // ピルの数ではなく結果 JSON を見る。失敗時にもピルが出るので数え間違えるため。
+    const readBench = () =>
+      page.evaluate(() => {
+        const pre = document.getElementById('out');
+        if (!pre) return null;
+        try {
+          return (JSON.parse(pre.textContent ?? '{}')['描画ベンチ'] ?? null) as
+            | { splatCount: number; frameMs: number; drawnSplats: number }[]
+            | null;
+        } catch {
+          return null;
+        }
+      });
 
-    const bench = results['描画ベンチ'] as { splatCount: number; frameMs: number; drawnSplats: number }[];
-    expect(bench.length).toBe(2);
+    await expect
+      .poll(async () => (await readBench())?.length ?? 0, { timeout: 8 * 60 * 1000, intervals: [2000] })
+      .toBe(2);
 
-    const std = bench.find((b) => b.splatCount === 424_000);
-    expect(std, '標準プリセット（42万）の結果がありません').toBeTruthy();
-    // 背面カリングが効いていること。全部描いていたら実装が壊れている。
-    expect(std!.drawnSplats).toBeGreaterThan(0);
-    expect(std!.drawnSplats).toBeLessThan(424_000);
+    const bench = (await readBench()) ?? [];
+    expect(bench.map((b) => b.splatCount)).toEqual([20_000, 60_000]);
+
+    const big = bench.find((b) => b.splatCount === 60_000);
+    expect(big, '60,000 個の結果がありません').toBeTruthy();
+
+    // 背面カリングが効いていること。全部描いていたら法線かカリングが壊れている。
+    expect(big!.drawnSplats).toBeGreaterThan(0);
+    expect(big!.drawnSplats).toBeLessThan(60_000);
+    // 球殻に撒いたサーフェルなので、おおよそ半分が裏を向く
+    const cullRatio = 1 - big!.drawnSplats / 60_000;
+    expect(cullRatio).toBeGreaterThan(0.25);
+    expect(cullRatio).toBeLessThan(0.75);
 
     metrics['renderBench'] = bench;
-    metrics['gaussianCount'] = std!.splatCount;
+    metrics['cullRatio'] = cullRatio;
     save();
   });
 });
