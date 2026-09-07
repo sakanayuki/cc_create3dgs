@@ -89,6 +89,63 @@ def da3_like(path: Path, size: int = 16) -> None:
     onnx.save(model, str(path))
 
 
+def two_input_like(path: Path, size: int = 16) -> None:
+    """MI-GAN と同じ形。uint8 の画像とマスクの2入力を取る。"""
+    graph = helper.make_graph(
+        [
+            helper.make_node("Cast", ["mask"], ["m32"], to=TensorProto.FLOAT),
+            helper.make_node("Cast", ["image"], ["i32"], to=TensorProto.FLOAT),
+            helper.make_node("Mul", ["i32", "m32"], ["r32"]),
+            helper.make_node("Cast", ["r32"], ["result"], to=TensorProto.UINT8),
+        ],
+        "two_input",
+        [
+            helper.make_tensor_value_info("image", TensorProto.UINT8, [1, 3, size, size]),
+            helper.make_tensor_value_info("mask", TensorProto.UINT8, [1, 1, size, size]),
+        ],
+        [helper.make_tensor_value_info("result", TensorProto.UINT8, [1, 3, size, size])],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+    onnx.save(model, str(path))
+
+
+def check_multi_input(d: Path) -> bool:
+    """2入力のモデル（MI-GAN）に、必要な入力を全部渡せることを見る。
+
+    較正はここでも落ちた。最初の1つしか渡していなかったため。
+
+        Required inputs (['mask']) are missing from input feed (['image'])
+    """
+    import calibrate as cal
+
+    src = d / "twoinput.onnx"
+    two_input_like(src)
+    sess = ort.InferenceSession(str(src), providers=["CPUExecutionProvider"])
+    img = np.random.default_rng(3).random((1, 3, 16, 16)).astype(np.float32)
+
+    ok = True
+    try:
+        sess.run(None, {"image": (img * 255).astype(np.uint8)})
+        ok &= check("2入力モデルに1つだけ渡すと落ちる（前提の確認）", False, "落ちなかった")
+    except Exception:
+        ok &= check("2入力モデルに1つだけ渡すと落ちる（前提の確認）", True)
+
+    try:
+        feed = cal.make_feed(sess, img, "inpaint")
+        names = sorted(feed)
+        ok &= check("較正が2入力を全部埋める", names == ["image", "mask"], ", ".join(names))
+        ok &= check(
+            "uint8 の入力を uint8 で渡す",
+            all(feed[n].dtype == np.uint8 for n in feed),
+            ", ".join(f"{n}={feed[n].dtype}" for n in feed),
+        )
+        sess.run(None, feed)
+        ok &= check("較正が2入力モデルを動かせる", True)
+    except Exception as e:
+        ok &= check("較正が2入力モデルを動かせる", False, str(e)[:200])
+    return ok
+
+
 def check_rank_handling(d: Path) -> bool:
     """多視点モデル（5階入力）に NCHW を渡しても通ることを見る。
 
@@ -109,7 +166,7 @@ def check_rank_handling(d: Path) -> bool:
         ok &= check("5階モデルに NCHW を直接渡すと落ちる（前提の確認）", True)
 
     try:
-        out = cal.run(sess, x)
+        out = cal.run(sess, x, "depth")
         ok &= check("較正が5階モデルを扱える", out.ndim == 3, f"出力の階数 {out.ndim}")
     except Exception as e:
         ok &= check("較正が5階モデルを扱える", False, str(e)[:200])
@@ -195,6 +252,7 @@ def main() -> int:
                 passed &= check(f"{mode}: fp32 と相関 {corr:.4f}", corr > floor)
 
         passed &= check_rank_handling(d)
+        passed &= check_multi_input(d)
 
         # 壊れたファイルを見逃さないこと
         bad = d / "broken.onnx"
