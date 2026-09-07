@@ -12,7 +12,7 @@ import { createRenderer, type RendererBackend } from '../render/createRenderer';
 import { createSession, type Backend, type ModelSource } from '../runtime/OrtSession';
 import { encodeOct, packHalf2, packRgba8 } from '../codec/pack';
 import { estimateNormals } from '../pipeline/3-calibrate';
-import { buildSplats, type SplatBuild } from '../pipeline/6-splats';
+import { buildSplats, DEFAULT_BUILD_PARAMS, type SplatBuild } from '../pipeline/6-splats';
 import { adaptiveSample, solveSamplingParams } from '../pipeline/7-sample';
 import { thicknessMap } from '../pipeline/4-shell';
 
@@ -543,7 +543,14 @@ export async function probePixels(
  * シェル組み立て を実際に走らせるので、座標系の取り違えのような
  * 「繋いでみて初めて分かる」不具合が実機でも出る。
  */
-export function buildPipelineSplats(size = 256, reduction = 0.3): SplatBuild {
+export type PipelineScene = 'ellipsoid' | 'step';
+
+export function buildPipelineSplats(
+  size = 256,
+  reduction = 0.3,
+  scene: PipelineScene = 'ellipsoid',
+  skirt = true,
+): SplatBuild {
   const nearZ = 1.0;
   const farZ = 1.5;
   const focalPx = size * 1.25;
@@ -552,24 +559,43 @@ export function buildPipelineSplats(size = 256, reduction = 0.3): SplatBuild {
   const color = new Uint8ClampedArray(size * size * 4);
   const alpha = new Uint8ClampedArray(size * size);
 
-  // 縦長の楕円体（人物のつもり）。表面に細かい起伏を載せる。
-  const rx = size * 0.30;
-  const ry = size * 0.40;
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      const i = y * size + x;
-      const dx = (x - size / 2) / rx;
-      const dy = (y - size / 2) / ry;
-      const rr = dx * dx + dy * dy;
-      if (rr > 1) continue;
-      alpha[i] = 255;
-      const bulge = Math.sqrt(1 - rr);
-      depth[i] = 0.75 - 0.45 * bulge + 0.006 * Math.sin(x * 0.5) * Math.sin(y * 0.45);
-      const shade = 110 + 110 * bulge;
-      color[i * 4] = shade;
-      color[i * 4 + 1] = shade * 0.78;
-      color[i * 4 + 2] = shade * 0.68;
-      color[i * 4 + 3] = 255;
+  if (scene === 'ellipsoid') {
+    // 縦長の楕円体（人物のつもり）。表面に細かい起伏を載せる。
+    const rx = size * 0.30;
+    const ry = size * 0.40;
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const i = y * size + x;
+        const dx = (x - size / 2) / rx;
+        const dy = (y - size / 2) / ry;
+        const rr = dx * dx + dy * dy;
+        if (rr > 1) continue;
+        alpha[i] = 255;
+        const bulge = Math.sqrt(1 - rr);
+        depth[i] = 0.75 - 0.45 * bulge + 0.006 * Math.sin(x * 0.5) * Math.sin(y * 0.45);
+        const shade = 110 + 110 * bulge;
+        color[i * 4] = shade;
+        color[i * 4 + 1] = shade * 0.78;
+        color[i * 4 + 2] = shade * 0.68;
+        color[i * 4 + 3] = 255;
+      }
+    }
+  } else {
+    // 手前の板が奥の板を隠している場面。真ん中に深度の不連続がある。
+    // 視点を振ると段差の奥側に穴が開くので、スカートの効き目をここで測る。
+    const m = Math.round(size * 0.15);
+    for (let y = m; y < size - m; y++) {
+      for (let x = m; x < size - m; x++) {
+        const i = y * size + x;
+        alpha[i] = 255;
+        const near = x < size / 2;
+        depth[i] = near ? 0.35 : 0.72;
+        const c = near ? 205 : 95;
+        color[i * 4] = c;
+        color[i * 4 + 1] = c * 0.9;
+        color[i * 4 + 2] = c * 0.8;
+        color[i * 4 + 3] = 255;
+      }
     }
   }
 
@@ -587,5 +613,6 @@ export function buildPipelineSplats(size = 256, reduction = 0.3): SplatBuild {
     alpha,
     thickness,
     null,
+    { ...DEFAULT_BUILD_PARAMS, skirt },
   );
 }

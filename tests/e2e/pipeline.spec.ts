@@ -45,11 +45,16 @@ interface Shot {
   thinRatio: number;
 }
 
-async function shoot(page: Page, yaw: number): Promise<Shot> {
-  return page.evaluate(async (y: number) => {
+async function shoot(
+  page: Page,
+  yaw: number,
+  scene: 'ellipsoid' | 'step' = 'ellipsoid',
+  skirt = true,
+): Promise<Shot> {
+  return page.evaluate(async ({ y, scene: sc, skirt: sk }: { y: number; scene: string; skirt: boolean }) => {
     const api = window.__photosplat;
     if (!api) throw new Error('__photosplat がページに露出していません');
-    const built = api.buildPipelineSplats(192, 0.3);
+    const built = api.buildPipelineSplats(192, 0.3, sc as 'ellipsoid' | 'step', sk);
     const size = 256;
     const canvas = document.createElement('canvas');
     canvas.width = size;
@@ -143,7 +148,7 @@ async function shoot(page: Page, yaw: number): Promise<Shot> {
     } finally {
       canvas.remove();
     }
-  }, yaw);
+  }, { y: yaw, scene, skirt });
 }
 
 test.describe('パイプライン通しの描画', () => {
@@ -213,5 +218,30 @@ test.describe('パイプライン通しの描画', () => {
 
     // 斜めからは背面シェルの一部が見えるようになる
     expect(side.drawn).toBeGreaterThan(0);
+  });
+});
+
+test.describe('スカート（docs/03 §3.6.3）', () => {
+  /**
+   * 段差の奥側に開く穴を、スカートが本当に塞ぐか。
+   *
+   * スカート有無で同じ場面を描き、シルエット内側の穴の割合を比べる。
+   * 「それらしく見える」ではなく、数で効果を確かめる。
+   */
+  test('視点を振ったとき、段差の奥に開く穴を塞ぐ', async ({ page }) => {
+    await page.goto('/poc.html');
+    await expect(page.locator('#cap .pill')).toBeVisible({ timeout: 30_000 });
+
+    const withoutSkirt = await shoot(page, 0.6, 'step', false);
+    const withSkirt = await shoot(page, 0.6, 'step', true);
+    results['段差・スカート無し'] = withoutSkirt;
+    results['段差・スカート有り'] = withSkirt;
+    save();
+
+    expect(withSkirt.count, 'スカートが1枚も足されていません').toBeGreaterThan(withoutSkirt.count);
+    expect(
+      withSkirt.holeRatio,
+      `穴の割合: スカート無し ${withoutSkirt.holeRatio} → 有り ${withSkirt.holeRatio}`,
+    ).toBeLessThan(withoutSkirt.holeRatio);
   });
 });

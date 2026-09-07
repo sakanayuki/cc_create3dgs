@@ -100,9 +100,17 @@ function normals(data: Uint8Array, count: number): [number, number, number][] {
 describe('前面シェル', () => {
   it('セル1個につきスプラット1個', () => {
     const { result, cells } = build(false);
-    expect(result.count).toBe(cells.cellCount);
     expect(result.frontCount).toBe(cells.cellCount);
     expect(result.data.length).toBe(result.count * SPLAT_BYTES);
+  });
+
+  it('滑らかな面にはスカートを立てない', () => {
+    // 合成した半球は連続な曲面。輪郭付近では勾配が無限大に近づくが、
+    // それは「急な斜面」であって不連続ではない。ここを段差と誤ると
+    // 輪郭全周にスカートが立つ（勾配の跳ね上がりを見る前は 800 枚立った）。
+    const { result } = build(false);
+    expect(result.skirtCount, `スカートが ${result.skirtCount} 枚立っています`).toBe(0);
+    expect(result.count).toBe(result.frontCount);
   });
 
   it('単位立方体に収まる', () => {
@@ -206,5 +214,110 @@ describe('背面シェル', () => {
     const back = pts.slice(result.frontCount);
     const meanZ = (a: [number, number, number][]) => a.reduce((s, p) => s + p[2], 0) / a.length;
     expect(meanZ(back)).toBeLessThan(meanZ(front));
+  });
+});
+
+describe('スカート（docs/03 §3.6.3）', () => {
+  /** 手前の板が奥の板を部分的に隠している場面。真ん中に深度の不連続がある。 */
+  function twoSlabs() {
+    const depth = new Float32Array(S * S);
+    const color = new Uint8ClampedArray(S * S * 4);
+    const alpha = new Uint8ClampedArray(S * S);
+    for (let y = 8; y < S - 8; y++) {
+      for (let x = 8; x < S - 8; x++) {
+        const i = y * S + x;
+        alpha[i] = 255;
+        const near = x < S / 2;
+        depth[i] = near ? 0.3 : 0.7; // 0.4 の段差
+        const c = near ? 200 : 90;
+        color[i * 4] = c;
+        color[i * 4 + 1] = c;
+        color[i * 4 + 2] = c;
+        color[i * 4 + 3] = 255;
+      }
+    }
+    return { depth, color, alpha };
+  }
+
+  function buildStep() {
+    const { depth, color, alpha } = twoSlabs();
+    const metric = new Float32Array(S * S);
+    for (let i = 0; i < metric.length; i++) metric[i] = NEAR + (depth[i] as number) * (FAR - NEAR);
+    const normals = estimateNormals(metric, S, S, FOCAL, 0.05);
+    const cells = adaptiveSample(depth, color, alpha, S, S, SAMPLING_PRESETS.high);
+    return buildSplats(
+      { cells, normals, width: S, height: S, focalPx: FOCAL, nearZ: NEAR, farZ: FAR },
+      color,
+      alpha,
+      null,
+      null,
+      { ...DEFAULT_BUILD_PARAMS, backShell: false },
+    );
+  }
+
+  it('本当の段差にはスカートを立てる', () => {
+    const r = buildStep();
+    expect(r.skirtCount, 'スカートが1枚も立っていません').toBeGreaterThan(0);
+  });
+
+  it('スカートは段差の手前と奥の間に置かれる', () => {
+    const r = buildStep();
+    const pts = positions(r.data, r.count);
+    const skirt = pts.slice(r.frontCount + r.backCount);
+    expect(skirt.length).toBe(r.skirtCount);
+
+    // 前面シェルの z の範囲（ワールド空間、+z が手前）
+    const front = pts.slice(0, r.frontCount).map((p) => p[2]);
+    const zMin = Math.min(...front);
+    const zMax = Math.max(...front);
+    for (const p of skirt) {
+      expect(p[2]).toBeGreaterThanOrEqual(zMin - 1e-3);
+      expect(p[2]).toBeLessThanOrEqual(zMax + 1e-3);
+    }
+    // 中間の深さにも置かれている（端に張り付いていない）
+    const mid = skirt.filter((p) => p[2] > zMin + (zMax - zMin) * 0.25 && p[2] < zMax - (zMax - zMin) * 0.25);
+    expect(mid.length, 'スカートが段差の中間に無い').toBeGreaterThan(0);
+  });
+
+  it('スカートは奥へ行くほど薄くなる', () => {
+    const r = buildStep();
+    const u = new Uint32Array(r.data.buffer, r.data.byteOffset, (r.count * SPLAT_BYTES) / 4);
+    const pts = positions(r.data, r.count);
+    const alphas: { z: number; a: number }[] = [];
+    for (let i = r.frontCount + r.backCount; i < r.count; i++) {
+      const rgba = u[(i * SPLAT_BYTES) / 4 + 5] as number;
+      alphas.push({ z: (pts[i] as [number, number, number])[2], a: (rgba >>> 24) & 0xff });
+    }
+    // z が小さい（奥）ほど α が小さいこと。相関で見る。
+    const n = alphas.length;
+    const mz = alphas.reduce((s, v) => s + v.z, 0) / n;
+    const ma = alphas.reduce((s, v) => s + v.a, 0) / n;
+    let cov = 0;
+    for (const v of alphas) cov += (v.z - mz) * (v.a - ma);
+    expect(cov, '奥ほど薄い、になっていません').toBeGreaterThan(0);
+  });
+
+  it('スカートを切れば枚数はゼロ', () => {
+    const { depth, color, alpha } = twoSlabs();
+    const metric = new Float32Array(S * S);
+    for (let i = 0; i < metric.length; i++) metric[i] = NEAR + (depth[i] as number) * (FAR - NEAR);
+    const cells = adaptiveSample(depth, color, alpha, S, S, SAMPLING_PRESETS.high);
+    const r = buildSplats(
+      {
+        cells,
+        normals: estimateNormals(metric, S, S, FOCAL, 0.05),
+        width: S,
+        height: S,
+        focalPx: FOCAL,
+        nearZ: NEAR,
+        farZ: FAR,
+      },
+      color,
+      alpha,
+      null,
+      null,
+      { ...DEFAULT_BUILD_PARAMS, backShell: false, skirt: false },
+    );
+    expect(r.skirtCount).toBe(0);
   });
 });

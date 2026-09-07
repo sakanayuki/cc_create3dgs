@@ -215,11 +215,21 @@ export function detectDepthEdges(
       const z = depth[i] as number;
 
       // 4近傍で最も大きい「奥向きの」ギャップ。手前向きは別の画素側で拾う。
+      //
+      // 隣が背景の場合は数えない。背景の深度は推定されていないので、
+      // そこを段差とみなすとシルエット全周に偽のエッジが立つ。背景側の
+      // 配列が 0 で埋まっていれば差が負になって偶然弾かれるが、
+      // それに頼ると埋め方を変えた瞬間に壊れる。
       let gap = 0;
-      if (x > 0) gap = Math.max(gap, (depth[i - 1] as number) - z);
-      if (x + 1 < width) gap = Math.max(gap, (depth[i + 1] as number) - z);
-      if (y > 0) gap = Math.max(gap, (depth[i - width] as number) - z);
-      if (y + 1 < height) gap = Math.max(gap, (depth[i + width] as number) - z);
+      const consider = (j: number): void => {
+        if ((alpha[j] as number) < SUBJECT_THRESHOLD) return;
+        const d = (depth[j] as number) - z;
+        if (d > gap) gap = d;
+      };
+      if (x > 0) consider(i - 1);
+      if (x + 1 < width) consider(i + 1);
+      if (y > 0) consider(i - width);
+      if (y + 1 < height) consider(i + width);
 
       if (gap > limit) out[i] = gap / 65535;
     }

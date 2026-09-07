@@ -16,6 +16,7 @@
  */
 import { encodeOct, packHalf2, packRgba8 } from '../codec/pack';
 import { SPLAT_BYTES } from '../render/SplatRenderer';
+import { distanceTransform } from './geometry/distanceTransform';
 import type { CellMap } from './7-sample';
 
 /** 被写体とみなす α。 */
@@ -52,6 +53,33 @@ export interface BuildParams {
   readonly backStride: number;
   /** 背面の減光。 */
   readonly backShade: number;
+  /**
+   * リム処理の幅（画素）。docs/03 §3.6.1 は 2px。
+   * シルエットからこの距離までのサーフェルは α を落とし、スケールを広げ、
+   * 法線を視線方向へ寄せる。0 で無効。
+   */
+  readonly rimWidth: number;
+  /** リムでのスケール倍率。 */
+  readonly rimScale: number;
+  /** リムで法線を視線方向へ寄せる強さ（0〜1）。 */
+  readonly rimNormalBlend: number;
+  /** スカートを作るか（docs/03 §3.6.3）。 */
+  readonly skirt: boolean;
+  /** スカートを立てる深度ギャップの下限（正規化深度）。 */
+  readonly skirtThreshold: number;
+  /**
+   * 段差と判定する「勾配の跳ね上がり」の倍率。
+   *
+   * 単に差が大きいだけでは、急な斜面と本当の不連続を区別できない。
+   * 球の輪郭付近は勾配が無限大に近づくので、閾値だけだとそこ全部に
+   * スカートが立ってしまう（実際に合成した半球で 800 枚立った）。
+   * 反対側の隣との差の何倍かを見て、勾配が跳ねている所だけを採る。
+   */
+  readonly skirtStepRatio: number;
+  /** スカートの1枚あたりの奥行き刻み（画素相当）。 */
+  readonly skirtStep: number;
+  /** スカート1本あたりの最大枚数。長い帯が際限なく増えるのを防ぐ。 */
+  readonly skirtMaxSteps: number;
 }
 
 export const DEFAULT_BUILD_PARAMS: BuildParams = {
@@ -60,6 +88,14 @@ export const DEFAULT_BUILD_PARAMS: BuildParams = {
   backShell: true,
   backStride: 2,
   backShade: 0.55,
+  rimWidth: 2,
+  rimScale: 1.5,
+  rimNormalBlend: 0.6,
+  skirt: true,
+  skirtThreshold: 0.02,
+  skirtStepRatio: 3,
+  skirtStep: 1.5,
+  skirtMaxSteps: 12,
 };
 
 export interface Normalization {
@@ -72,8 +108,12 @@ export interface SplatBuild {
   /** レンダラに渡す 24 バイト × count。 */
   readonly data: Uint8Array;
   readonly count: number;
-  /** 前面シェルの個数。残りは背面シェル。 */
+  /** 前面シェルの個数。 */
   readonly frontCount: number;
+  /** 背面シェルの個数。 */
+  readonly backCount: number;
+  /** スカートの個数。 */
+  readonly skirtCount: number;
   /** 正規化に使った変換。背面シェルやスカートを後から足すのに要る。 */
   readonly normalization: Normalization;
   /** ワールド空間での深度レンジ。レンダラの setDepthRange に渡す。 */
@@ -137,6 +177,10 @@ export function buildSplats(
   }
   const points: Point[] = [];
 
+  // シルエットからの距離。リム処理で使う。
+  const silhouetteDist =
+    params.rimWidth > 0 ? distanceTransform(alpha, width, height, (v) => v >= SUBJECT_ALPHA) : null;
+
   for (let c = 0; c < cells.cellCount; c++) {
     const size = cells.size[c] as number;
     const u = (cells.x[c] as number) + size / 2;
@@ -155,16 +199,43 @@ export function buildSplats(
       normals[ni + 2] as number,
     ];
 
+    const pos = unproject(u, v, z, focalPx, cx, cy);
+    let a = Math.round((cells.alpha[c] as number) * 255);
+    let footprint = size;
+    let nrm = n;
+
+    // リム処理（docs/03 §3.6.1）。シルエットの内側 rimWidth までは
+    // α を落とし、スケールを広げ、法線を視線方向へ寄せる。
+    // 縁のサーフェルは深度が背景と混ざって当てにならないので、そこを
+    // そのまま立てると輪郭がぎざぎざに切れる。
+    if (params.rimWidth > 0 && silhouetteDist) {
+      const d = silhouetteDist[py * width + px] as number;
+      if (d < params.rimWidth) {
+        const t = Math.max(0, Math.min(1, d / params.rimWidth)); // 0 = 縁
+        a = Math.round(a * (0.35 + 0.65 * t));
+        footprint = size * (1 + (params.rimScale - 1) * (1 - t));
+        // 視線方向（面からカメラへ）。パイプライン側なのでカメラは原点。
+        const len = Math.hypot(pos[0], pos[1], pos[2]) || 1;
+        const view: [number, number, number] = [-pos[0] / len, -pos[1] / len, -pos[2] / len];
+        const w = params.rimNormalBlend * (1 - t);
+        const bx = n[0] * (1 - w) + view[0] * w;
+        const by = n[1] * (1 - w) + view[1] * w;
+        const bz = n[2] * (1 - w) + view[2] * w;
+        const bl = Math.hypot(bx, by, bz) || 1;
+        nrm = [bx / bl, by / bl, bz / bl];
+      }
+    }
+
     points.push({
-      pos: unproject(u, v, z, focalPx, cx, cy),
-      nrm: n,
-      footprint: size,
+      pos,
+      nrm,
+      footprint,
       z,
       rgba: [
         Math.round((cells.color[c * 3] as number) * 255),
         Math.round((cells.color[c * 3 + 1] as number) * 255),
         Math.round((cells.color[c * 3 + 2] as number) * 255),
-        Math.round((cells.alpha[c] as number) * 255),
+        a,
       ],
     });
   }
@@ -211,6 +282,106 @@ export function buildSplats(
       }
     }
   }
+
+  const backCount = points.length - frontCount;
+
+  // --- ③ スカート（docs/03 §3.6.3）
+  //
+  // 深度が不連続な縁の奥側には、視点を振ると「入力画像には写っていない領域」が
+  // 露出する。そこへ、手前の面から奥の面へ向かって帯状のガウシアンを立てて塞ぐ。
+  // 色は本来 ⑧ のインペイント結果から採るが、それが無い間は奥側の色を伸ばす
+  // （v1 方式）。プレビューはこの色で出し、インペイント完了後に差し替える。
+  if (params.skirt) {
+    const gapLimit = params.skirtThreshold;
+    for (let y = 1; y < height - 1; y++) {
+      for (let x = 1; x < width - 1; x++) {
+        const i = y * width + x;
+        if ((alpha[i] as number) < SUBJECT_ALPHA) continue;
+        const ci = cells.cellId[i] as number;
+        if (ci < 0) continue;
+        const dHere = cells.depth[ci] as number;
+
+        // 4近傍で最も大きい「奥向きの」段差と、その向き。
+        let gap = 0;
+        let gx = 0;
+        let gy = 0;
+        const consider = (j: number, ox: number, oy: number): void => {
+          if ((alpha[j] as number) < SUBJECT_ALPHA) return;
+          const cj = cells.cellId[j] as number;
+          if (cj < 0) return;
+          const d = (cells.depth[cj] as number) - dHere;
+          if (d > gap) {
+            gap = d;
+            gx = ox;
+            gy = oy;
+          }
+        };
+        consider(i - 1, -1, 0);
+        consider(i + 1, 1, 0);
+        consider(i - width, 0, -1);
+        consider(i + width, 0, 1);
+        if (gap < gapLimit) continue;
+
+        // 反対側の隣との差と比べ、勾配が跳ねている所だけを段差とみなす。
+        // 滑らかな急斜面では前後の差がほぼ等しいので、ここで落ちる。
+        const opp = i - gy * width - gx;
+        let backDiff = 0;
+        if ((alpha[opp] as number) >= SUBJECT_ALPHA) {
+          const co = cells.cellId[opp] as number;
+          if (co >= 0) backDiff = Math.abs(dHere - (cells.depth[co] as number));
+        }
+        if (gap < backDiff * params.skirtStepRatio) continue;
+
+        // シルエットのすぐ内側は背面シェルとリム処理が受け持つ。
+        // ここにスカートまで立てると、輪郭が二重に厚くなる。
+        if (silhouetteDist && (silhouetteDist[i] as number) < params.rimWidth + 1) continue;
+
+        const zNear = metricZ(dHere, nearZ, farZ);
+        const zFar = metricZ(dHere + gap, nearZ, farZ);
+        const pixelWorldZ = zNear / focalPx;
+        const steps = Math.max(
+          1,
+          Math.min(params.skirtMaxSteps, Math.round((zFar - zNear) / (pixelWorldZ * params.skirtStep))),
+        );
+
+        // 壁の法線は画像平面内で段差に垂直、**奥側**（＝勾配の向き）を向く。
+        //
+        // 崖に喩えると分かりやすい。左に台地（手前）、右に谷（奥）があるとき、
+        // 崖の露出面は右を向いている。左から見れば台地が崖を隠すので見えない。
+        // 視点を右（+x）へ振ると、台地は谷より大きく左へ動くので台地の右端の
+        // 裏が露出する。そこを塞ぐのがこの壁で、面は右＝勾配の向きを向く。
+        //
+        // 最初ここを逆向き（-gx, -gy）にしていた。スカートは生成されるのに
+        // 背面カリングで全部落ち、描画数も絵も1画素も変わらなかった。
+        // 穴の割合を測って初めて分かった（tests/e2e/pipeline.spec.ts）。
+        const gl = Math.hypot(gx, gy) || 1;
+        const wallN: [number, number, number] = [gx / gl, gy / gl, 0];
+
+        // 色は段差の奥側の画素から採る（インペイントが無いときの縮退）。
+        const fi = (y + gy) * width + (x + gx);
+        const cr = color[fi * 4] as number;
+        const cg = color[fi * 4 + 1] as number;
+        const cb = color[fi * 4 + 2] as number;
+
+        for (let s = 1; s <= steps; s++) {
+          const t = s / (steps + 1);
+          const z = zNear + t * (zFar - zNear);
+          // 奥へ行くほど薄くする。奥の端まで不透明だと、そこに板が
+          // 見えてしまう（塞ぎたいのは隙間であって、面を足したいのではない）。
+          const fade = 1 - t;
+          points.push({
+            pos: unproject(x + 0.5, y + 0.5, z, focalPx, cx, cy),
+            nrm: wallN,
+            footprint: params.skirtStep,
+            z,
+            rgba: [cr, cg, cb, Math.round(255 * fade)],
+          });
+        }
+      }
+    }
+  }
+
+  const skirtCount = points.length - frontCount - backCount;
 
   // --- ③ ワールド空間へ移し、単位立方体に正規化する
   let minX = Infinity, minY = Infinity, minZ = Infinity;
@@ -286,6 +457,8 @@ export function buildSplats(
     data: new Uint8Array(buf),
     count: points.length,
     frontCount,
+    backCount,
+    skirtCount,
     normalization,
     nearZ: Number.isFinite(outNear) ? outNear : 0.5,
     farZ: Number.isFinite(outFar) ? outFar : 1.5,
