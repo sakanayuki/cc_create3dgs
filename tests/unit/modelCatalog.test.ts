@@ -9,6 +9,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import {
   fileForBackend,
   loadManifest,
+  manifestBackendKey,
   resetManifestCache,
   resolveModel,
   totalBytesFor,
@@ -113,5 +114,33 @@ describe('ダウンロード量', () => {
     };
     const m: Manifest = { models: [shared] };
     expect(totalBytesFor(m, 'webgpu', ['modnet', 'modnet'])).toBe(6_600_000);
+  });
+});
+
+describe('shader-f16 が無い WebGPU', () => {
+  it('q4f16 を避けて uint8 側を選ぶ', () => {
+    // q4f16 は shader-f16 拡張が要る。無い実装では ORT の f16 シェーダが
+    // コンパイルに失敗するが例外にならず、出力が壊れたまま「成功」する。
+    // 実測では DA3 の intrinsics が全て 0 で返った（CPU では fx=887.5）。
+    expect(manifestBackendKey('webgpu', true)).toBe('webgpu');
+    expect(manifestBackendKey('webgpu', false)).toBe('wasm');
+  });
+
+  it('WASM 経路は影響を受けない', () => {
+    expect(manifestBackendKey('wasm', true)).toBe('wasm');
+    expect(manifestBackendKey('wasm', false)).toBe('wasm');
+  });
+
+  it('実際に uint8 のファイルが返る', async () => {
+    resetManifestCache();
+    const manifest: Manifest = { models: [entry()] };
+    await loadManifest((async () =>
+      new Response(JSON.stringify(manifest), { status: 200 })) as unknown as typeof fetch);
+
+    const hf = { repo: 'onnx-community/depth-anything-v3-small', file: 'onnx/model.onnx' };
+    const withF16 = await resolveModel('depth-anything-v3-small', 'webgpu', hf, true);
+    const noF16 = await resolveModel('depth-anything-v3-small', 'webgpu', hf, false);
+    expect(withF16[0]!.url).toContain('depth.q4f16.onnx');
+    expect(noF16[0]!.url).toContain('depth.uint8.onnx');
   });
 });

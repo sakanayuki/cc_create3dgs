@@ -62,7 +62,8 @@ async function boot(): Promise<void> {
   const backend = inferenceBackend(cap);
   $('env').textContent =
     backend === 'webgpu'
-      ? `この端末: WebGPU で推論・描画（作業グリッド ${cap.workingGrid}²）`
+      ? `この端末: WebGPU で推論・描画（作業グリッド ${cap.workingGrid}²` +
+        `${cap.shaderF16 ? '' : '、shader-f16 が無いため uint8 モデルを使用'}）`
       : `この端末: WASM ${iso.maxThreads} スレッドで推論、WebGL2 で描画`;
 
   if (!cap.webgpu.supported && !('WebGL2RenderingContext' in window)) {
@@ -125,11 +126,18 @@ async function run(file: File): Promise<void> {
       reduction: preset.reduction,
       inpaint: preset.inpaint,
       backend: inferenceBackend(cap),
+      // shader-f16 が無い WebGPU では q4f16 のモデルが黙って壊れる。
+      // その場合は uint8 側を落とす（modelCatalog の manifestBackendKey）。
+      shaderF16: cap.shaderF16,
       onProgress: setProgress,
       // プレビューができた時点で先に見せる（docs/03 §3.1）。
       // インペイントを待たずに立体が出る。
       onPreview: (b) => {
+        // プレビューは「まだ仕上げ中」の下書き。黙って出すと、統計が空のまま
+        // 止まって見え、終わったのか壊れたのか分からない。
         show('view');
+        $('refining').hidden = false;
+        $('stats').innerHTML = '';
         viewer.resize();
         viewer.setSplats(b.data, b.count, b.nearZ, b.farZ);
       },
@@ -137,6 +145,7 @@ async function run(file: File): Promise<void> {
     state.result = result;
 
     show('view');
+    $('refining').hidden = true;
     viewer.resize();
     viewer.setSplats(result.build.data, result.build.count, result.build.nearZ, result.build.farZ);
 
@@ -189,6 +198,7 @@ export function mountApp(): void {
   });
   $('again').addEventListener('click', () => {
     ($('photo') as HTMLInputElement).value = '';
+    $('refining').hidden = true;
     show('pick');
   });
   $('retry').addEventListener('click', () => show('pick'));

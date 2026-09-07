@@ -26,6 +26,13 @@ export interface Capability {
   readonly crossOriginIsolated: boolean;
   /** WASM フォールバック時に使えるスレッド数。 */
   readonly wasmThreads: number;
+  /**
+   * WebGPU に `shader-f16` があるか。
+   *
+   * 無い実装では q4f16 のモデルが**黙って壊れる**（決定 D22 の補足、
+   * src/runtime/modelCatalog.ts の manifestBackendKey）。
+   */
+  readonly shaderF16: boolean;
 }
 
 /** 本設計が必要とする limits の下限。これを割ると作業グリッドを落とす。 */
@@ -79,6 +86,7 @@ export async function detectCapability(): Promise<Capability> {
       workingGrid: 512,
       crossOriginIsolated: isolated,
       wasmThreads,
+      shaderF16: false,
     };
   }
 
@@ -91,6 +99,7 @@ export async function detectCapability(): Promise<Capability> {
       workingGrid: 512,
       crossOriginIsolated: isolated,
       wasmThreads,
+      shaderF16: false,
     };
   }
   if (!adapter) {
@@ -99,6 +108,7 @@ export async function detectCapability(): Promise<Capability> {
       workingGrid: 512,
       crossOriginIsolated: isolated,
       wasmThreads,
+      shaderF16: false,
     };
   }
 
@@ -117,6 +127,8 @@ export async function detectCapability(): Promise<Capability> {
     workingGrid: gridForLimits(limits),
     crossOriginIsolated: isolated,
     wasmThreads,
+    // q4f16 のモデルを使ってよいかの判断材料。無いと黙って壊れる。
+    shaderF16: adapter.features.has('shader-f16'),
   };
 }
 

@@ -36,6 +36,11 @@ export interface GenerateOptions {
   readonly reduction: number;
   /** 推論の実行プロバイダ。 */
   readonly backend: Backend;
+  /**
+   * WebGPU に `shader-f16` があるか。無ければ q4f16 のモデルを避ける
+   * （src/runtime/modelCatalog.ts の manifestBackendKey）。既定は「ある」。
+   */
+  readonly shaderF16?: boolean;
   /** 進捗の報告。0〜1 と、いま何をしているか。 */
   readonly onProgress?: (fraction: number, label: string) => void;
   /** プレビューができた時点で1回呼ばれる。 */
@@ -82,8 +87,9 @@ async function loadModel(
   id: string,
   backend: Backend,
   fallback: HfFallback,
+  shaderF16 = true,
 ): Promise<ort.InferenceSession> {
-  const sources = await resolveModel(id, backend, fallback);
+  const sources = await resolveModel(id, backend, fallback, shaderF16);
   const errors: string[] = [];
   for (const src of sources) {
     try {
@@ -167,15 +173,23 @@ async function runMatte(
   grid: number,
   mode: SubjectMode,
   backend: Backend,
+  shaderF16: boolean,
 ): Promise<Uint8ClampedArray> {
   const size = mode === 'person' ? 512 : 1024;
   const session =
     mode === 'person'
-      ? await loadModel('modnet', backend, { repo: 'Xenova/modnet', file: 'onnx/model_uint8.onnx' })
-      : await loadModel('isnet-general', backend, {
-          repo: 'imgly/isnet-general-onnx',
-          file: 'onnx/model.onnx',
-        });
+      ? await loadModel(
+          'modnet',
+          backend,
+          { repo: 'Xenova/modnet', file: 'onnx/model_uint8.onnx' },
+          shaderF16,
+        )
+      : await loadModel(
+          'isnet-general',
+          backend,
+          { repo: 'imgly/isnet-general-onnx', file: 'onnx/model.onnx' },
+          shaderF16,
+        );
 
   const small = resizeRgba(rgba, grid, grid, size, size);
   const input = toTensorNCHW(small, size, size, { mean: [0.5, 0.5, 0.5], std: [0.5, 0.5, 0.5] });
@@ -216,13 +230,19 @@ async function runDepth(
   rgba: Uint8ClampedArray,
   grid: number,
   backend: Backend,
+  shaderF16: boolean,
 ): Promise<DepthOutput> {
   const size = 518;
-  const session = await loadModel('depth-anything-v3-small', backend, {
-    repo: 'onnx-community/depth-anything-v3-small',
-    file: 'onnx/model.onnx',
-    extra: 'onnx/model.onnx_data',
-  });
+  const session = await loadModel(
+    'depth-anything-v3-small',
+    backend,
+    {
+      repo: 'onnx-community/depth-anything-v3-small',
+      file: 'onnx/model.onnx',
+      extra: 'onnx/model.onnx_data',
+    },
+    shaderF16,
+  );
 
   const small = resizeRgba(rgba, grid, grid, size, size);
   const input = toTensorNCHW(small, size, size, { mean: IMAGENET_MEAN, std: IMAGENET_STD });
@@ -238,15 +258,27 @@ async function runDepth(
   // intrinsics は [fx 0 cx; 0 fy cy; 0 0 1]。推論解像度での画素単位なので、
   // 作業グリッドの大きさに直す。
   let focalPx: number | null = null;
+  let intrinsicsNote = '出力に intrinsics がありません';
   for (const name of session.outputNames) {
     if (!name.toLowerCase().includes('intrinsic')) continue;
     const t = out[name] as ort.Tensor | undefined;
-    const d = t?.data as unknown as Float32Array | undefined;
-    if (d && d.length >= 5 && Number.isFinite(d[0]) && (d[0] as number) > 0) {
-      focalPx = (d[0] as number) * (grid / size);
+    const d = t?.data as unknown as ArrayLike<number> | undefined;
+    if (!d) {
+      intrinsicsNote = `${name} のデータを取り出せません`;
+      break;
+    }
+    const fx = Number(d[0]);
+    if (d.length >= 5 && Number.isFinite(fx) && fx > 0) {
+      focalPx = fx * (grid / size);
+      intrinsicsNote = `fx=${fx.toFixed(1)} @${size}px`;
+    } else {
+      intrinsicsNote = `${name} の値が使えません（長さ ${d.length}、fx=${String(d[0])}）`;
     }
     break;
   }
+  // 焦点距離は遠近感そのものを決める。仮定に落ちたときは、なぜそうなったかを
+  // 残しておかないと「なんとなく歪んでいる」で終わってしまう。
+  console.info(`[PhotoSplat] 深度モデルの出力: ${session.outputNames.join(', ')} / 内部パラメータ: ${intrinsicsNote}`);
 
   // DA3 は深度そのもの、V2 は逆深度。出力名で見分ける。
   const isInverse = !session.outputNames.some((n) => n.toLowerCase().includes('predicted_depth'));
@@ -265,6 +297,7 @@ async function runInpaint(
   masked: InpaintMask,
   grid: number,
   backend: Backend,
+  shaderF16: boolean,
 ): Promise<{ plane: Uint8ClampedArray; used: 'mi-gan' | 'stretch' }> {
   const fallback = (): { plane: Uint8ClampedArray; used: 'stretch' } => ({
     plane: stretchFallback(rgba, masked.mask, grid, grid),
@@ -274,10 +307,12 @@ async function runInpaint(
 
   try {
     const size = 512;
-    const session = await loadModel('mi-gan', backend, {
-      repo: 'andraniksargsyan/migan',
-      file: 'migan_pipeline_v2.onnx',
-    });
+    const session = await loadModel(
+      'mi-gan',
+      backend,
+      { repo: 'andraniksargsyan/migan', file: 'migan_pipeline_v2.onnx' },
+      shaderF16,
+    );
 
     const small = resizeRgba(rgba, grid, grid, size, size);
     const maskSmall = resizePlane(masked.mask, grid, grid, size, size);
@@ -348,11 +383,14 @@ export async function generate(photo: Blob, options: GenerateOptions): Promise<G
   const rgba = prepared.rgba;
 
   report(0.1, '被写体を切り抜いています');
-  const rawAlpha = await mark('マット推定', () => runMatte(rgba, grid, opts.mode, opts.backend));
+  const shaderF16 = opts.shaderF16 ?? true;
+  const rawAlpha = await mark('マット推定', () =>
+    runMatte(rgba, grid, opts.mode, opts.backend, shaderF16),
+  );
   const alpha = await mark('マット後処理', () => refineMatte(rawAlpha, rgba, grid, grid));
 
   report(0.35, '奥行きを推定しています');
-  const depthOut = await mark('深度推定', () => runDepth(rgba, grid, opts.backend));
+  const depthOut = await mark('深度推定', () => runDepth(rgba, grid, opts.backend, shaderF16));
   const focalPx = depthOut.focalPx ?? assumedFocal(grid);
 
   report(0.62, '奥行きを整えています');
@@ -421,7 +459,7 @@ export async function generate(photo: Blob, options: GenerateOptions): Promise<G
     );
     if (masked.maskedPixels > 0) {
       const painted = await mark('インペイント', () =>
-        runInpaint(rgba, masked, grid, opts.backend),
+        runInpaint(rgba, masked, grid, opts.backend, shaderF16),
       );
       inpaintUsed = painted.used;
       // スカートの色だけが変わるので、組み立て直す。

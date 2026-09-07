@@ -38,6 +38,23 @@ export interface Manifest {
   readonly models: readonly ManifestEntry[];
 }
 
+/**
+ * マニフェストのどのバックエンド欄を引くか決める。
+ *
+ * q4f16 は WebGPU の **`shader-f16` 拡張**を必要とする。この拡張が無い
+ * 実装では ORT の f16 シェーダがコンパイルに失敗するが、**例外にならない**。
+ * 出力が壊れたまま推論が「成功」してしまう。実測では Depth Anything 3 の
+ * `intrinsics` が全て 0 で返り（CPU では fx=887.5）、焦点距離が取れないまま
+ * 画角 55° の仮定に落ちていた。深度そのものも当てにならない。
+ *
+ * したがって、`shader-f16` が無い WebGPU では q4f16 を選ばない。
+ * uint8 側（WASM 用に置いてあるもの）を使う。実行プロバイダは WebGPU の
+ * ままでよく、変えるのは「どのファイルを落とすか」だけである。
+ */
+export function manifestBackendKey(backend: Backend, shaderF16: boolean): string {
+  return backend === 'webgpu' && !shaderF16 ? 'wasm' : backend;
+}
+
 /** HuggingFace の直リンク。同一オリジンに無いときの保険。 */
 export interface HfFallback {
   readonly repo: string;
@@ -105,11 +122,14 @@ export async function resolveModel(
   id: string,
   backend: Backend,
   fallback: HfFallback,
+  /** WebGPU に `shader-f16` があるか。無ければ q4f16 を避ける。 */
+  shaderF16 = true,
 ): Promise<ModelSource[]> {
   const out: ModelSource[] = [];
   const manifest = await loadManifest();
   const entry = manifest?.models.find((m) => m.id === id);
-  const file = entry ? fileForBackend(entry, backend) : null;
+  const key = manifestBackendKey(backend, shaderF16);
+  const file = entry ? fileForBackend(entry, key as Backend) : null;
   if (file) out.push({ id, url: `${baseUrl()}models/${file}` });
 
   out.push({

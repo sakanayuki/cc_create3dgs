@@ -93,8 +93,11 @@ test.describe('本体アプリ', () => {
       await page.locator('#retry').click();
       await expect(page.locator('#pick')).toBeVisible();
     } else {
-      // 成功したなら、統計と保存ボタンが出ていること
-      await expect(page.locator('#stats')).toContainText('ガウシアン');
+      // 閲覧画面はプレビュー（下書き）の時点で出るので、統計が埋まるのは
+      // その後になる。仕上げが終わるまで待つ。
+      // 仕上げ中は「下書きです」と出ていること。終われば消えること。
+      await expect(page.locator('#stats')).toContainText('ガウシアン', { timeout: 10 * 60 * 1000 });
+      await expect(page.locator('#refining')).toBeHidden();
       await expect(page.locator('#save')).toBeVisible();
     }
 
