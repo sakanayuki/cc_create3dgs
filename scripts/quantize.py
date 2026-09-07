@@ -88,10 +88,7 @@ def to_fp16(model: onnx.ModelProto, block_ops: set[str]) -> onnx.ModelProto:
 
 def quantize_q4f16(src: Path, dst: Path, cfg: dict[str, Any]) -> None:
     """fp16 化したうえで MatMul の重みを 4bit にする（transformers.js の q4f16 相当）。"""
-    from onnxruntime.quantization.matmul_nbits_quantizer import (
-        MatMulNBitsQuantizer,
-        RTNWeightOnlyQuantConfig,
-    )
+    from onnxruntime.quantization import matmul_nbits_quantizer as mnq
 
     model = load_model(src)
     block_ops = ALWAYS_EXCLUDE_OPS | set(cfg.get("excludeOpTypes", []))
@@ -101,12 +98,27 @@ def quantize_q4f16(src: Path, dst: Path, cfg: dict[str, Any]) -> None:
     if cfg.get("keepHeadFp16", False):
         exclude += head_node_names(model, tail_ratio=float(cfg.get("headTailRatio", 0.15)))
 
-    quantizer = MatMulNBitsQuantizer(
+    # DefaultWeightOnlyQuantConfig は onnxruntime だけで完結する。
+    # RTNWeightOnlyQuantConfig は onnxruntime 1.22 系では neural-compressor
+    # （torch を引き連れてくる）を要求し、CI がそれで落ちた。手法としては
+    # どちらも RTN（round-to-nearest）なので、結果に実質的な差は無い。
+    # 引数の受け口はバージョンで違う（CI は 1.22 系、手元は 1.29 系）。
+    # 名前付きで渡せなければ既定値で作る。ブロックサイズと対称性は
+    # MatMulNBitsQuantizer 側にも渡しているので、そちらが効く。
+    try:
+        algo_config = mnq.DefaultWeightOnlyQuantConfig(
+            block_size=int(cfg.get("blockSize", 32)),
+            is_symmetric=bool(cfg.get("symmetric", True)),
+        )
+    except TypeError:
+        algo_config = mnq.DefaultWeightOnlyQuantConfig()
+
+    quantizer = mnq.MatMulNBitsQuantizer(
         model,
         block_size=int(cfg.get("blockSize", 32)),
         is_symmetric=bool(cfg.get("symmetric", True)),
         nodes_to_exclude=sorted(set(exclude)),
-        algo_config=RTNWeightOnlyQuantConfig(),
+        algo_config=algo_config,
     )
     quantizer.process()
     save_model(quantizer.model.model, dst)
