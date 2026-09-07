@@ -363,7 +363,9 @@ export class Webgl2SplatRenderer implements SplatRenderer {
     gl.disable(gl.DEPTH_TEST);
     gl.enable(gl.BLEND);
     // 遠→近にソートしてあるので通常の "over" で正しい
-    gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    // α は ONE で足す。SRC_ALPHA を掛けると a·a になり、面が透けたままになる
+    // （WGSL 版と同じ規約。src/render/backends/wgsl.ts を参照）。
+    gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
 
     gl.useProgram(this.program);
     gl.activeTexture(gl.TEXTURE0);

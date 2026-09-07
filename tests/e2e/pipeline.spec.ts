@@ -28,6 +28,21 @@ interface Shot {
   centroid: [number, number] | null;
   bbox: [number, number, number, number] | null;
   meanColor: [number, number, number] | null;
+  /**
+   * シルエットの内側にある「穴」の割合。
+   *
+   * 行ごとに最左・最右の点灯画素を取り、その間にある非点灯画素を数える。
+   * 斜めから見たときにサーフェルが櫛状に隙間を作る破綻（docs/03 §3.6.3 が
+   * スカートで塞ぐもの）を、目で見ずに数で追える。
+   */
+  holeRatio: number;
+  /**
+   * シルエットの内側で α が薄い（< 200）画素の割合。
+   *
+   * 斜めから見るとサーフェルが edge-on になって投影楕円が細り、面が
+   * 「透けて」見える。完全な穴にはならないので holeRatio では拾えない。
+   */
+  thinRatio: number;
 }
 
 async function shoot(page: Page, yaw: number): Promise<Shot> {
@@ -82,6 +97,32 @@ async function shoot(page: Page, yaw: number): Promise<Shot> {
             if (yy > y1) y1 = yy;
           }
         }
+        // 行ごとの内側の穴を数える
+        let span = 0;
+        let holes = 0;
+        let thin = 0;
+        for (let yy = 0; yy < size; yy++) {
+          let rx0 = -1;
+          let rx1 = -1;
+          for (let xx = 0; xx < size; xx++) {
+            const i = (yy * size + xx) * 4;
+            const a = px[i + 3] as number;
+            const lum = (px[i] as number) + (px[i + 1] as number) + (px[i + 2] as number);
+            if (a <= 8 && lum <= 12) continue;
+            if (rx0 < 0) rx0 = xx;
+            rx1 = xx;
+          }
+          if (rx0 < 0) continue;
+          for (let xx = rx0; xx <= rx1; xx++) {
+            span++;
+            const i = (yy * size + xx) * 4;
+            const a = px[i + 3] as number;
+            const lum = (px[i] as number) + (px[i + 1] as number) + (px[i + 2] as number);
+            if (a <= 8 && lum <= 12) holes++;
+            if (a < 200) thin++;
+          }
+        }
+
         const n = Math.max(lit, 1);
         return {
           backend,
@@ -93,6 +134,8 @@ async function shoot(page: Page, yaw: number): Promise<Shot> {
           centroid: lit > 0 ? [sx / n / size, sy / n / size] : null,
           bbox: lit > 0 ? [x0 / size, y0 / size, (x1 + 1) / size, (y1 + 1) / size] : null,
           meanColor: lit > 0 ? [Math.round(sr / n), Math.round(sg / n), Math.round(sb / n)] : null,
+          holeRatio: span > 0 ? Math.round((holes / span) * 10_000) / 10_000 : 0,
+          thinRatio: span > 0 ? Math.round((thin / span) * 10_000) / 10_000 : 0,
         } as unknown as Shot;
       } finally {
         renderer.dispose();
@@ -139,6 +182,13 @@ test.describe('パイプライン通しの描画', () => {
     expect(cx).toBeLessThan(0.6);
     expect(cy).toBeGreaterThan(0.35);
     expect(cy).toBeLessThan(0.65);
+
+    // 被写体は不透明なので、シルエットの内側はほぼ埋まっていなければならない。
+    // ここが緩いと、ページ背景が透けて幽霊のように見える。
+    // 実際、α のブレンド係数を src-alpha にしていたとき（正しくは one）、
+    // 中心画素の α が 177/255 しかなく、内側の 98% が α < 200 だった。
+    expect(front.thinRatio, `内側の ${(front.thinRatio * 100).toFixed(1)}% が半透明です`).toBeLessThan(0.1);
+    expect(front.holeRatio).toBeLessThan(0.02);
 
     expect(errors, `ページ内で例外が起きました: ${errors.join(' / ')}`).toEqual([]);
   });

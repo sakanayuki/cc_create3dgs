@@ -150,9 +150,13 @@ export class WgslSplatRenderer implements SplatRenderer {
           {
             format: this.format,
             // 遠→近にソートしてあるので通常の "over" で正しい
+            // α は 'one' で足す。フラグメントが返すのはストレート α なので、
+            // 色は src-alpha で乗じて事前乗算にするのが正しいが、α まで
+            // src-alpha を掛けると a·a になって毎回小さく積まれる。
+            // α 0.77 のサーフェルが 0.59 しか積まれず、面が透けたままになる。
             blend: {
               color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
-              alpha: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+              alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
             },
           },
         ],
