@@ -10,7 +10,7 @@ import { LIGHT_GRID, WORKING_GRID } from '../pipeline/0-preprocess';
 import { detectCapability, type Capability } from '../runtime/capability';
 import { configureOrt, ortDevice, type Backend } from '../runtime/OrtSession';
 import { isolationSummary } from '../runtime/crossOriginIsolation';
-import { toSpzFile } from './export';
+import { EXPORT_FORMATS, toSplatFile, type ExportFormat } from './export';
 import { Viewer } from './viewer';
 
 export type Preset = 'light' | 'standard' | 'high';
@@ -178,17 +178,40 @@ async function run(file: File): Promise<void> {
   }
 }
 
+function currentFormat(): ExportFormat {
+  const el = document.querySelector<HTMLInputElement>('input[name="format"]:checked');
+  return (el?.value as ExportFormat) ?? 'spz';
+}
+
+/** 選ばれている形式の説明を出す。何が違うのか分からないまま選ばせない。 */
+function showFormatNote(): void {
+  const info = EXPORT_FORMATS[currentFormat()];
+  $('formatNote').textContent = info.note;
+  $('save').textContent = `${info.label} で保存`;
+}
+
 async function download(): Promise<void> {
   const r = state.result;
   if (!r) return;
-  const blob = await toSpzFile(r.build.data, r.build.count);
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `photosplat-${Date.now()}.spz`;
-  a.click();
-  // revoke は次のタスクで。同期で消すと Safari でダウンロードが始まらない。
-  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  const format = currentFormat();
+  const info = EXPORT_FORMATS[format];
+  const button = $<HTMLButtonElement>('save');
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = '書き出しています…';
+  try {
+    const blob = await toSplatFile(r.build.data, r.build.count, format);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `photosplat-${Date.now()}.${info.extension}`;
+    a.click();
+    // revoke は次のタスクで。同期で消すと Safari でダウンロードが始まらない。
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  } finally {
+    button.disabled = false;
+    button.textContent = label;
+  }
 }
 
 export function mountApp(): void {
@@ -203,5 +226,9 @@ export function mountApp(): void {
   });
   $('retry').addEventListener('click', () => show('pick'));
   $('save').addEventListener('click', () => void download());
+  for (const el of document.querySelectorAll('input[name="format"]')) {
+    el.addEventListener('change', showFormatNote);
+  }
+  showFormatNote();
   void boot();
 }

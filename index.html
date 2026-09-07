@@ -127,8 +127,14 @@ input[type=file]{font:inherit;font-size:13.5px}
     </p>
     <p class="note">ドラッグで回す・ピンチで拡大。横 ±45°、縦 ±25° まで自然に見えます。</p>
     <div id="stats"></div>
+    <div class="row" style="margin-top:10px">
+      <label class="opt"><input type="radio" name="format" value="spz" checked>.spz</label>
+      <label class="opt"><input type="radio" name="format" value="ply">.ply</label>
+      <label class="opt"><input type="radio" name="format" value="splat">.splat</label>
+    </div>
+    <p class="note" id="formatNote" style="margin-top:0"></p>
     <div class="row">
-      <button class="btn" id="save">.spz で保存</button>
+      <button class="btn" id="save">保存</button>
       <button class="btn ghost" id="again">別の写真で</button>
     </div>
     <p class="note">描画: <span id="renderInfo" class="mono">—</span></p>
