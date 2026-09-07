@@ -43,6 +43,23 @@ code{font-family:"IBM Plex Mono",monospace;font-size:.88em;background:var(--surf
 .stat .k{font-size:11.5px;color:var(--ink-3);display:block}
 .stat .v{font-family:"IBM Plex Mono",monospace;font-weight:600;font-size:16px}
 footer{margin-top:40px;color:var(--ink-3);font-size:12.5px}
+[hidden]{display:none!important}
+.note{font-size:12.5px;color:var(--ink-3);margin:8px 0 0}
+label.opt{display:inline-flex;align-items:center;gap:7px;background:var(--surface-2);border:1px solid var(--line);
+  border-radius:8px;padding:9px 13px;margin:0 8px 8px 0;font-size:13.5px;min-height:44px;cursor:pointer}
+label.opt:has(input:checked){border-color:var(--accent);background:var(--accent-soft);color:var(--accent);font-weight:700}
+button.btn{font:inherit;display:inline-flex;align-items:center;justify-content:center;gap:8px;font-weight:700;font-size:14.5px;
+  background:var(--accent);color:#fff;border:0;padding:12px 18px;border-radius:9px;min-height:44px;cursor:pointer}
+button.btn.ghost{background:transparent;color:var(--accent);border:1px solid var(--accent)}
+button.btn:disabled{opacity:.5;cursor:default}
+.bar{height:7px;background:var(--surface-2);border-radius:999px;overflow:hidden;margin:14px 0 8px}
+.bar>span{display:block;height:100%;width:0;background:var(--accent);transition:width .25s ease}
+#cv{width:100%;aspect-ratio:1;background:var(--surface-2);border:1px solid var(--line);border-radius:11px;
+  touch-action:none;display:block}
+.row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:14px}
+pre.mono{background:var(--surface-2);border-radius:8px;padding:11px 13px;overflow-x:auto;font-size:12px;margin:8px 0 0}
+details summary{cursor:pointer;font-size:12.5px;color:var(--ink-3);margin-top:10px}
+input[type=file]{font:inherit;font-size:13.5px}
 </style>
 </head>
 <body>
@@ -60,40 +77,59 @@ footer{margin-top:40px;color:var(--ink-3);font-size:12.5px}
     <div class="stat"><span class="k">生成</span><span class="v">7.2 s</span></div>
   </div>
 
-  <h2>いまの状態</h2>
-  <div class="card warn">
-    <h3>生成パイプラインは実装中です</h3>
-    <p>
-      設計（v2）は確定し、土台・CI・描画レンダラ・実機検証ハーネスまで実装済みです。
-      ただし設計自身が「<strong>PoC-1 の結果が出るまで本実装に入らない</strong>」と定めているため、
-      写真から生成する機能はまだ有効になっていません。PoC-1 が通れば残りを実装します。
-    </p>
-  </div>
+  <section id="pick">
+    <h2>写真を選ぶ</h2>
+    <div class="card">
+      <p>被写体が1つだけ写っていて、背景と分かれている写真がうまくいきます。</p>
+      <div class="row" style="margin-top:6px">
+        <label class="opt"><input type="radio" name="mode" value="person" checked>人物</label>
+        <label class="opt"><input type="radio" name="mode" value="object">モノ</label>
+      </div>
+      <div class="row" style="margin-top:0">
+        <label class="opt"><input type="radio" name="preset" value="light">軽量</label>
+        <label class="opt"><input type="radio" name="preset" value="standard" checked>標準</label>
+        <label class="opt"><input type="radio" name="preset" value="high">高品質</label>
+      </div>
+      <p class="note" style="margin-bottom:14px">
+        初回はモデルのダウンロードに 100 MB 以上かかります。Wi-Fi をおすすめします。
+        一度落としたものは端末内にキャッシュされます。
+      </p>
+      <input id="photo" type="file" accept="image/*">
+    </div>
+    <div class="card warn" id="unsupported" hidden>
+      <h3>この端末では生成できません</h3>
+      <p>WebGPU も WebGL2 も使えないため、描画ができません。</p>
+    </div>
+    <div class="card accent">
+      <h3>実機の検証ハーネス</h3>
+      <p>モデルの読み込み・推論速度・描画性能を個別に測れます。</p>
+      <p id="env" class="mono note">この端末: 判定中…</p>
+      <a class="btn ghost" href="./poc.html">PoC-1 を開く →</a>
+    </div>
+  </section>
 
-  <div class="card accent">
-    <h3>PoC-1 を実機で実行してください</h3>
-    <p>
-      設計全体が成立するかを決める検証です。<strong>このページをスマートフォンで開いて</strong>実行し、
-      結果をコピーして共有してください。判定するのは、ONNX Runtime の WebGPU が iOS Safari / Android Chrome で
-      動くか（R1）、Depth Anything 3 が動くか（R10）、42万サーフェルで 60fps が出るか（R12）の3点です。
-    </p>
-    <a class="btn" href="./poc.html">PoC-1 を開く →</a>
-  </div>
+  <section id="work" hidden>
+    <h2>つくっています</h2>
+    <div class="card">
+      <div class="bar" id="bar"><span></span></div>
+      <p id="stage" class="mono" style="font-size:13px">準備しています</p>
+      <p class="note">端末の中だけで処理しています。写真は送信されません。</p>
+    </div>
+    <div class="card warn" id="workError" hidden></div>
+    <button class="btn ghost" id="retry">選び直す</button>
+  </section>
 
-  <h2>設計</h2>
-  <div class="card">
-    <p>
-      設計書はリポジトリの <code>docs/</code> に8本あります。軽量化の中核は
-      「単一画像由来のガウシアンは元から2Dピクセル格子に乗っているので、
-      一般の3DGS圧縮が数秒かける属性の並べ替えが構造的に不要になる」という点で、
-      これにより vanilla PLY 比 約350倍、ガウシアン1個あたり実効1.8バイトに収まります。
-    </p>
-    <ul>
-      <li><code>01-requirements.md</code> — 要件と決定 D1〜D18、改訂履歴</li>
-      <li><code>04-compression.md</code> — 軽量化の4階層とビット割当</li>
-      <li><code>08-risks.md</code> — リスクと PoC 計画</li>
-    </ul>
-  </div>
+  <section id="view" hidden>
+    <h2>できました</h2>
+    <canvas id="cv"></canvas>
+    <p class="note">ドラッグで回す・ピンチで拡大。横 ±45°、縦 ±25° まで自然に見えます。</p>
+    <div id="stats"></div>
+    <div class="row">
+      <button class="btn" id="save">.spz で保存</button>
+      <button class="btn ghost" id="again">別の写真で</button>
+    </div>
+    <p class="note">描画: <span id="renderInfo" class="mono">—</span></p>
+  </section>
 
   <footer>
     生成処理はすべて端末内で完結します。写真がネットワークに送信されることはありません。

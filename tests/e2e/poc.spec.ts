@@ -26,8 +26,15 @@ test.describe('本体シェル', () => {
     await expect(page.locator('h1')).toContainText('PhotoSplat');
     await expect(page.locator('a.btn')).toContainText('PoC-1');
 
-    // main.ts が能力判定を終えて注記を足すのを待つ
-    await expect(page.locator('.card.accent p.mono')).toContainText('この端末:', { timeout: 30_000 });
+    // 最初は「選ぶ」画面。他の2つは隠れている。
+    await expect(page.locator('#pick')).toBeVisible();
+    await expect(page.locator('#work')).toBeHidden();
+    await expect(page.locator('#view')).toBeHidden();
+    await expect(page.locator('#photo')).toBeVisible();
+
+    // 能力判定が終わって、どの経路で動くかが出る
+    await expect(page.locator('#env')).toContainText('この端末:', { timeout: 30_000 });
+    await expect(page.locator('#env')).not.toContainText('判定中', { timeout: 30_000 });
     expect(errors, `ページ内で例外が起きました: ${errors.join(' / ')}`).toEqual([]);
   });
 });
