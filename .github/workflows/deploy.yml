@@ -2,8 +2,10 @@ name: deploy
 
 # GitHub Actions 経由で GitHub Pages に反映する（本プロジェクトの技術要件）。
 on:
+  # 既定ブランチへの push で自動反映する。
+  # このリポジトリの既定ブランチは main ではないため、ブランチ名を固定せず
+  # 「既定ブランチかどうか」で判定する（下の guard ジョブ）。
   push:
-    branches: [main]
   workflow_dispatch:
     inputs:
       models:
@@ -32,8 +34,28 @@ env:
   PROFILE: ${{ inputs.profile || 'permissive' }}
 
 jobs:
+  guard:
+    name: 既定ブランチか確認
+    runs-on: ubuntu-latest
+    outputs:
+      proceed: ${{ steps.check.outputs.proceed }}
+    steps:
+      - id: check
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.ref_name }}" = "${{ github.event.repository.default_branch }}" ]; then
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            echo "既定ブランチ以外への push なのでデプロイしません（${{ github.ref_name }}）" \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   models:
     name: モデルの取得と量子化
+    needs: guard
+    if: needs.guard.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     outputs:
       cache-key: ${{ steps.key.outputs.value }}
@@ -90,7 +112,8 @@ jobs:
 
   build:
     name: ビルドとバジェット検証
-    needs: models
+    needs: [guard, models]
+    if: needs.guard.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

@@ -1,0 +1,100 @@
+name: deploy-poc
+
+# PoC ページ（poc.html）を GitHub Pages に出すためだけのワークフロー。
+#
+# 実機で PoC-1 / PoC-2 を回すのが目的なので、モデルの取得と量子化は行わない。
+#   ・PoC-1 のモデル計測は HuggingFace から直接取得する
+#   ・PoC-2 のスレッド計測は同梱の合成モデル（public/threadbench.onnx, 0.8MB）を使う
+# そのため 1〜2 分で反映される。
+#
+# 入力は不要。Actions タブから「Run workflow」を押すだけで動く。
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 本番の deploy と同じグループにして、Pages への同時デプロイを防ぐ
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: PoC ページをビルド
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      # ONNX Runtime の wasm を同一オリジンで配る（決定 D7）。
+      # マルチスレッド版（jsep）と単スレッド版の両方を置く。
+      - name: ONNX Runtime の wasm を複製
+        run: node scripts/copy_ort.mjs
+
+      - name: ビルド
+        env:
+          PAGES_BASE: /${{ github.event.repository.name }}/
+        run: npm run build
+
+      - name: 同梱物の確認
+        run: |
+          set -e
+          echo "### 配信されるファイル" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          find dist -type f | sort >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          # PoC が動くのに必須のファイルが欠けていないか確かめる
+          for f in dist/poc.html dist/coi-sw.js dist/threadbench.onnx \
+                   dist/ort/ort-wasm-simd-threaded.jsep.wasm; do
+            if [ ! -f "$f" ]; then
+              echo "::error::PoC に必要なファイルがありません: $f"
+              exit 1
+            fi
+          done
+
+      - name: 性能バジェット（参考、失敗させない）
+        continue-on-error: true
+        run: node scripts/budget_check.mjs --dist dist
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    name: Pages へデプロイ
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: 実機で開く URL を案内
+        run: |
+          {
+            echo "## PoC を実機で開く"
+            echo ""
+            echo "スマートフォンで次の URL を開いてください。"
+            echo ""
+            echo "**${{ steps.deployment.outputs.page_url }}poc.html**"
+            echo ""
+            echo "### PoC-2（スレッド計測）の手順 — 1分弱で終わります"
+            echo ""
+            echo "1. 「マルチスレッドを有効にする」を押す（1回リロードされます）"
+            echo "2. 「すぐ測る（同梱モデル 0.8 MB）」を押す"
+            echo "3. 「結果をコピー」で JSON を取得して共有してください"
+            echo ""
+            echo "「判定」の \`D11\` に結論が出ます。"
+          } >> "$GITHUB_STEP_SUMMARY"
