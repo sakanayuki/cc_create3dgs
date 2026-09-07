@@ -4,8 +4,24 @@
  * 実機で開いて実行し、結果をコピーして共有してもらう診断ツール。
  * 本体アプリとは独立に配信する（poc.html）。
  */
-import { CANDIDATES, benchRender, testModel, type Candidate, type ModelResult, type RenderBenchResult } from './bench';
+import {
+  CANDIDATES,
+  benchRender,
+  benchThreads,
+  syntheticThreadTarget,
+  testModel,
+  type Candidate,
+  type ModelResult,
+  type RenderBenchResult,
+  type ThreadTarget,
+} from './bench';
+import type { ThreadTestResponse } from './threadWorker';
 import { detectCapability, describeCapability, type Capability } from '../runtime/capability';
+import {
+  disableCrossOriginIsolation,
+  ensureCrossOriginIsolation,
+  isolationSummary,
+} from '../runtime/crossOriginIsolation';
 import { cachedBytes, clearModelCache, configureOrt, type Backend } from '../runtime/OrtSession';
 
 const $ = <T extends HTMLElement>(id: string): T => {
@@ -18,7 +34,9 @@ const state: {
   capability?: Capability;
   models: ModelResult[];
   render: RenderBenchResult[];
-} = { models: [], render: [] };
+  threads: ThreadTestResponse[];
+  threadTarget?: string;
+} = { models: [], render: [], threads: [] };
 
 const mb = (n: number) => `${(n / 1e6).toFixed(1)} MB`;
 
@@ -121,7 +139,105 @@ async function runModels(filter: (c: Candidate) => boolean): Promise<void> {
   }
 }
 
-// --- ③ 描画ベンチ -----------------------------------------------------------
+// --- ③ スレッド数の効果（PoC-2） ---------------------------------------------
+
+/** 実モデルでのスレッド計測。PoC-1 で WASM 最速だった uint8 版を使う。 */
+const THREAD_MODEL_ID = 'da2-small-uint8';
+
+function showIsolation(): void {
+  const s = isolationSummary();
+  const pill = $('coiState');
+  const detail = $('coiDetail');
+  if (s.crossOriginIsolated) {
+    pill.className = 'pill ok';
+    pill.textContent = 'マルチスレッド可';
+    detail.textContent = `最大 ${s.maxThreads} スレッド（論理コア ${s.hardwareConcurrency}）`;
+  } else {
+    pill.className = 'pill ng';
+    pill.textContent = '単スレッド';
+    detail.textContent = `crossOriginIsolated = false（論理コア ${s.hardwareConcurrency}）`;
+  }
+}
+
+async function enableCoi(): Promise<void> {
+  const r = await ensureCrossOriginIsolation(false);
+  $('coiDetail').textContent = r.detail ?? '';
+  if (r.state === 'reloading') {
+    $('coiState').className = 'pill run';
+    $('coiState').textContent = '再読み込みします…';
+    // Service Worker が制御を取るまで少し待ってからリロードする
+    setTimeout(() => location.reload(), 600);
+  } else {
+    showIsolation();
+  }
+}
+
+async function runThreadBench(useSynthetic: boolean): Promise<void> {
+  const out = $('threadOut');
+  let target: ThreadTarget | undefined;
+  if (useSynthetic) {
+    target = syntheticThreadTarget();
+  } else {
+    const c = CANDIDATES.find((x) => x.id === THREAD_MODEL_ID);
+    if (c) target = { label: c.label, source: c.source, inputSize: c.inputSize, approxMB: c.approxMB };
+  }
+  if (!target) {
+    out.textContent = 'スレッド計測の対象が見つかりません';
+    return;
+  }
+  const candidate = target;
+  const bar = $('threadBar').firstElementChild as HTMLElement;
+  const iso = isolationSummary();
+  const counts = iso.crossOriginIsolated ? [1, 2, 4] : [1];
+
+  out.innerHTML = `<div class="k">対象: ${esc(candidate.label)}</div>`;
+  if (!iso.crossOriginIsolated) {
+    out.innerHTML +=
+      '<div><span class="pill ng">単スレッドのみ</span> ' +
+      'まず「マルチスレッドを有効にする」を押してください。比較のため1スレッドだけ測ります。</div>';
+  }
+
+  state.threads = [];
+  state.threadTarget = candidate.label;
+  for (let i = 0; i < counts.length; i++) {
+    const n = counts[i] as number;
+    bar.style.width = `${((i + 0.5) / counts.length) * 100}%`;
+    out.innerHTML += `<div class="k" data-pending="${n}">${n} スレッド … 実行中</div>`;
+    const [res] = await benchThreads(candidate, [n]);
+    document.querySelector(`[data-pending="${n}"]`)?.remove();
+    if (!res) continue;
+    state.threads.push(res);
+
+    const base = state.threads.find((r) => r.numThreads === 1 && r.ok)?.inferMs;
+    const speedup = base && res.ok && res.inferMs ? ` — ${(base / res.inferMs).toFixed(2)}× 速い` : '';
+    out.innerHTML += res.ok
+      ? `<div class="row" style="gap:8px">
+           <span class="pill ok">${n} スレッド</span>
+           <span class="mono">推論 ${res.inferMs} ms（生成 ${res.createMs} ms）${speedup}</span>
+         </div>`
+      : `<div><span class="pill ng">${n} スレッド 失敗</span> <span class="mono">${esc(res.error ?? '')}</span></div>`;
+    dumpResults();
+    await new Promise((r) => setTimeout(r, 60));
+  }
+  bar.style.width = '100%';
+
+  const ok = state.threads.filter((r) => r.ok && r.inferMs);
+  if (ok.length >= 2) {
+    const one = ok.find((r) => r.numThreads === 1)?.inferMs;
+    const best = ok.reduce((a, b) => ((b.inferMs ?? 0) < (a.inferMs ?? Infinity) ? b : a));
+    if (one && best.inferMs) {
+      const gain = one / best.inferMs;
+      out.innerHTML +=
+        `<div class="row" style="gap:8px;margin-top:8px">
+           <span class="pill ${gain >= 2 ? 'ok' : 'run'}">結論</span>
+           <span class="mono">最良 ${best.numThreads} スレッドで <b>${gain.toFixed(2)}×</b>` +
+        `（${one} → ${best.inferMs} ms）</span>
+         </div>`;
+    }
+  }
+}
+
+// --- ④ 描画ベンチ -----------------------------------------------------------
 
 /**
  * ベンチの設定。既定は設計の4段階（軽量／カリング後／標準／高品質）。
@@ -203,6 +319,12 @@ function summary(): Record<string, unknown> {
       : { 利用可否: false, 理由: cap?.webgpu.reason ?? '未判定' },
     crossOriginIsolated: cap?.crossOriginIsolated ?? null,
     モデル: state.models,
+    スレッド計測: {
+      crossOriginIsolated: isolationSummary().crossOriginIsolated,
+      論理コア: isolationSummary().hardwareConcurrency,
+      対象: state.threadTarget ?? null,
+      結果: state.threads,
+    },
     描画ベンチ: state.render,
     判定: verdicts(),
   };
@@ -226,6 +348,18 @@ function verdicts(): Record<string, string> {
       (hasIntrinsics ? '内部パラメータの出力がある可能性が高い' : '深度のみ。焦点距離は EXIF → 画角55°仮定へ');
   }
 
+  const ok = state.threads.filter((t) => t.ok && t.inferMs);
+  const one = ok.find((t) => t.numThreads === 1)?.inferMs;
+  const best = ok.length ? ok.reduce((a, b) => ((b.inferMs ?? 0) < (a.inferMs ?? Infinity) ? b : a)) : null;
+  if (!one || !best?.inferMs || ok.length < 2) {
+    v['D11'] = isolationSummary().crossOriginIsolated ? '未検証' : '未検証（マルチスレッド未有効）';
+  } else {
+    const gain = one / best.inferMs;
+    v['D11'] = gain >= 2
+      ? `導入する価値あり — ${best.numThreads} スレッドで ${gain.toFixed(2)}× 速い（${one} → ${best.inferMs} ms）`
+      : `効果が小さい — 最良でも ${gain.toFixed(2)}×。Service Worker のコストに見合わない可能性`;
+  }
+
   const std = state.render.find((r) => r.splatCount === 424_000);
   if (!std) v['R12'] = '未検証';
   else v['R12'] = std.frameMs <= 16.6
@@ -245,11 +379,19 @@ function esc(s: string): string {
 // --- 起動 -------------------------------------------------------------------
 
 renderModelList();
+showIsolation();
 void showCapability().then(dumpResults);
 
 $('runDepth').addEventListener('click', () => void guard(() => runModels((c) => c.role === 'depth')));
 $('runAll').addEventListener('click', () => void guard(() => runModels(() => true)));
 $('runRender').addEventListener('click', () => void guard(runRenderBench));
+$('enableCoi').addEventListener('click', () => void guard(enableCoi));
+$('runThreadsQuick').addEventListener('click', () => void guard(() => runThreadBench(true)));
+$('runThreads').addEventListener('click', () => void guard(() => runThreadBench(false)));
+$('disableCoi').addEventListener('click', async () => {
+  await disableCrossOriginIsolation();
+  $('disableCoi').textContent = '解除しました。再読み込みしてください';
+});
 
 $('copy').addEventListener('click', async () => {
   const text = JSON.stringify(summary(), null, 2);

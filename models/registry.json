@@ -10,6 +10,17 @@
 
   "defaultProfile": "permissive",
 
+  "_backendQuantization": [
+    "PoC-1（2026-09-07, Android 10 実機）で判明: WASM では q4f16 が最遅（19.8s）、",
+    "uint8 が最速（12.9s）。MatMulNBits に WASM の速い経路が無いため。",
+    "したがって量子化方式はバックエンドで変える（決定 D19）。",
+    "CI は両方を生成し、ブラウザが実行プロバイダに応じて選ぶ。"
+  ],
+  "backendQuantization": {
+    "webgpu": "q4f16",
+    "wasm": "uint8"
+  },
+
   "profiles": {
     "permissive": {
       "_comment": "商用利用に制約のないモデルのみ。",
@@ -43,6 +54,7 @@
       "commercialUse": true,
       "inputSize": [518, 518],
       "outputKind": "metric-ish-depth",
+      "outputs": ["predicted_depth", "confidence", "extrinsics", "intrinsics"],
       "quantization": {
         "mode": "q4f16",
         "perChannel": true,
@@ -50,12 +62,21 @@
         "excludeOpTypes": ["LayerNormalization", "Softmax", "Sigmoid"],
         "keepHeadFp16": true
       },
+      "quantizationWasm": {
+        "mode": "uint8",
+        "perChannel": true,
+        "calibrationMethod": "Entropy",
+        "excludeOpTypes": ["LayerNormalization", "Softmax", "Sigmoid"]
+      },
       "expectedBytes": 22000000,
       "sizeTolerance": 0.35,
       "notes": [
-        "第一候補（決定 D15）。深度を直接予測するため、V2 の逆深度に固有のシフト不定性が無い。",
-        "カメラ内部パラメータのヘッドが ONNX に含まれるかは PoC-1 で確認する（リスク R10）。",
-        "含まれない場合は深度のみ使い、焦点距離は EXIF → 画角55°仮定にフォールバックする。"
+        "採用確定（決定 D15 / D20）。PoC-1 で実機動作を確認済み。",
+        "深度を直接予測するため、V2 の逆深度に固有のシフト不定性が無い。",
+        "ONNX 出力は 4 つ: predicted_depth / confidence / extrinsics / intrinsics。",
+        "intrinsics から焦点距離が直接得られるので、EXIF も画角55°の仮定も不要になった。",
+        "confidence は設計に無かった収穫で、信頼度の低い画素の深度を捨てる判断に使える。",
+        "WASM 単スレッドでの実測は fp32 で 13.3s（DA2-S の fp16 19.6s より速い）。"
       ]
     },
 
@@ -118,7 +139,12 @@
       "quantization": { "mode": "uint8", "perChannel": true, "calibrationMethod": "Entropy" },
       "expectedBytes": 44100000,
       "sizeTolerance": 0.25,
-      "notes": ["量子化版が未公開なので CI で自前生成する。物体全般＋高品質プリセットの人物マット。"]
+      "inputSizeWasm": [512, 512],
+      "notes": [
+        "量子化版が未公開なので CI で自前生成する。物体全般＋高品質プリセットの人物マット。",
+        "PoC-1 実測: WASM 単スレッドで 1024² は 37.8s と使えない。",
+        "WASM 経路では 512² に落とす（inputSizeWasm）。"
+      ]
     },
 
     "rmbg-1.4": {

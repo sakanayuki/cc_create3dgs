@@ -67,8 +67,15 @@ const metrics = existsSync(METRICS) ? JSON.parse(readFileSync(METRICS, 'utf8')) 
 
 // --- 判定 -------------------------------------------------------------------
 const results = [];
+const skipped = [];
 const add = (label, value, fmt, rule) => {
   if (!rule) return;
+  // 未計測（undefined/null）は 0 とみなさずスキップする。
+  // 0 として判定すると「まだ測っていない」が「上限違反」に化ける。
+  if (value === undefined || value === null || Number.isNaN(value)) {
+    skipped.push(label);
+    return;
+  }
   let level = 'ok';
   let limit = '';
   if (rule.failRange || rule.warnRange) {
@@ -98,11 +105,11 @@ add('モデル合計', modelTotal, mb, budget.models?.total);
 add('Pages 全体 (非圧縮)', pagesTotal, mb, budget.pages?.totalUncompressed);
 
 if (metrics) {
-  add('.pgs サイズ', metrics.pgsBytes ?? 0, kb, budget.output?.['pgs.bytes']);
-  add('ガウシアン数', metrics.gaussianCount ?? 0, (n) => n.toLocaleString('ja-JP'), budget.output?.gaussianCount);
-  add('SSIM (入力視点)', metrics.ssimInputView ?? 0, (n) => n.toFixed(3), budget.quality?.['ssim.inputView']);
-  add('穴の割合 (±45°)', metrics.holeRatio45 ?? 0, (n) => `${(n * 100).toFixed(2)}%`, budget.quality?.['holeRatio.45deg']);
-  add('縞指標の改善 (±45°)', metrics.stripeGain45 ?? 0, (n) => `${n.toFixed(2)} nat`, budget.quality?.['stripeGain.45deg']);
+  add('.pgs サイズ', metrics.pgsBytes, kb, budget.output?.['pgs.bytes']);
+  add('ガウシアン数', metrics.gaussianCount, (n) => n.toLocaleString('ja-JP'), budget.output?.gaussianCount);
+  add('SSIM (入力視点)', metrics.ssimInputView, (n) => n.toFixed(3), budget.quality?.['ssim.inputView']);
+  add('穴の割合 (±45°)', metrics.holeRatio45, (n) => `${(n * 100).toFixed(2)}%`, budget.quality?.['holeRatio.45deg']);
+  add('縞指標の改善 (±45°)', metrics.stripeGain45, (n) => `${n.toFixed(2)} nat`, budget.quality?.['stripeGain.45deg']);
 }
 
 // --- 出力 -------------------------------------------------------------------
@@ -120,6 +127,7 @@ const fails = results.filter((r) => r.level === 'fail');
 const warns = results.filter((r) => r.level === 'warn');
 console.log(`\n合格 ${results.length - fails.length - warns.length} / 警告 ${warns.length} / 失敗 ${fails.length}`);
 if (!metrics) console.log(`（${METRICS} が無いため、出力サイズと品質の判定はスキップしました）`);
+else if (skipped.length) console.log(`（未計測のためスキップ: ${skipped.join('、')}）`);
 
 if (process.env.GITHUB_STEP_SUMMARY) {
   const rows = results.map((r) => `| ${icon[r.level].trim() || '✓'} | ${r.label} | ${r.shown} | ${r.limit} |`);

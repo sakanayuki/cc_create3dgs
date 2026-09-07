@@ -253,6 +253,96 @@ export async function testModel(
   return result;
 }
 
+// --- スレッド計測（PoC-2） ---------------------------------------------------
+
+import type { ThreadTestRequest, ThreadTestResponse } from './threadWorker';
+
+/** スレッド計測の対象。実モデルでも同梱の合成モデルでもよい。 */
+export interface ThreadTarget {
+  readonly label: string;
+  readonly source: ModelSource;
+  readonly inputSize: readonly [number, number];
+  readonly approxMB: number;
+}
+
+/**
+ * 同一オリジンに置いた合成モデル（10層の畳み込み @512²、0.8MB）。
+ *
+ * 実モデル（27MB）を落とさずにスレッドのスケーリングだけ即座に測れる。
+ * 測っているのは畳み込みのスループットで、Transformer とは傾向が違いうるが、
+ * 「マルチスレッドが効くか否か」の判断には十分で、待ち時間が桁違いに短い。
+ */
+export function syntheticThreadTarget(): ThreadTarget {
+  const base = import.meta.env.BASE_URL ?? '/';
+  return {
+    label: '同梱の合成モデル（畳み込み10層 @512²）',
+    source: { id: 'threadbench', url: `${base}threadbench.onnx` },
+    inputSize: [512, 512],
+    approxMB: 0.8,
+  };
+}
+
+/**
+ * スレッド数を変えて同じモデルを推論し、スケーリングを測る。
+ *
+ * ONNX Runtime は wasm 初期化時に一度だけ numThreads を読むので、
+ * スレッド数ごとに新しいワーカーを立てる。
+ */
+export async function benchThreads(
+  candidate: ThreadTarget,
+  counts: readonly number[],
+  runs = 2,
+): Promise<ThreadTestResponse[]> {
+  const out: ThreadTestResponse[] = [];
+  for (const numThreads of counts) {
+    const worker = new Worker(new URL('./threadWorker.ts', import.meta.url), { type: 'module' });
+    try {
+      const req: ThreadTestRequest = {
+        modelUrl: candidate.source.url,
+        ...(candidate.source.externalData
+          ? {
+              externalDataUrl: candidate.source.externalData.url,
+              externalDataPath: candidate.source.externalData.path,
+            }
+          : {}),
+        numThreads,
+        inputSize: candidate.inputSize,
+        runs,
+      };
+      const res = await new Promise<ThreadTestResponse>((resolve) => {
+        const timer = setTimeout(
+          () =>
+            resolve({
+              numThreads,
+              ok: false,
+              crossOriginIsolated: false,
+              error: '3分以内に応答がありませんでした',
+            }),
+          180_000,
+        );
+        worker.onmessage = (e: MessageEvent<ThreadTestResponse>) => {
+          clearTimeout(timer);
+          resolve(e.data);
+        };
+        worker.onerror = (e) => {
+          clearTimeout(timer);
+          resolve({
+            numThreads,
+            ok: false,
+            crossOriginIsolated: false,
+            error: `ワーカーがエラーになりました: ${e.message}`,
+          });
+        };
+        worker.postMessage(req);
+      });
+      out.push(res);
+    } finally {
+      worker.terminate();
+    }
+  }
+  return out;
+}
+
 // --- 描画ベンチ（R12） -------------------------------------------------------
 
 export interface RenderBenchResult {

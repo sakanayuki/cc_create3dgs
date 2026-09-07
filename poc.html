@@ -93,7 +93,35 @@ label{display:flex;gap:8px;align-items:center;font-size:13.5px;color:var(--ink-2
   </div>
   <div class="card" id="models"></div>
 
-  <h2>③ 描画ベンチ（R12）</h2>
+  <h2>③ スレッド数の効果（PoC-2）</h2>
+  <div class="card">
+    <p class="k" style="margin:0 0 10px">
+      PoC-1 で分かった最大の課題は <b>WASM が単スレッドに制限されること</b>でした。
+      GitHub Pages は COOP/COEP ヘッダを返せないため <code>SharedArrayBuffer</code> が使えず、
+      その結果 人物 30 秒・物体 63 秒 かかっています。
+      Service Worker でヘッダを付与すればマルチスレッド化できるはずなので、
+      <b>実際に何倍速くなるか</b>をこの端末で測ります。
+    </p>
+    <div class="row" style="margin-bottom:10px">
+      <span class="k">現在:</span>
+      <span class="pill idle" id="coiState">判定中…</span>
+      <span class="k mono" id="coiDetail"></span>
+    </div>
+    <div class="row" style="margin-bottom:8px">
+      <button id="enableCoi">マルチスレッドを有効にする（1回リロードします）</button>
+    </div>
+    <div class="row">
+      <button id="runThreadsQuick">すぐ測る（同梱モデル 0.8 MB）</button>
+      <button id="runThreads" class="ghost">実モデルで測る（27 MB）</button>
+    </div>
+    <div class="bar" id="threadBar"><i></i></div>
+    <div id="threadOut" class="res" style="margin-top:10px"></div>
+    <div class="row" style="margin-top:10px">
+      <button id="disableCoi" class="ghost">Service Worker を解除する</button>
+    </div>
+  </div>
+
+  <h2>④ 描画ベンチ（R12）</h2>
   <div class="card">
     <p class="k" style="margin:0 0 10px">
       手続き的に作ったサーフェルを回して、フレーム時間の中央値を測ります。ダウンロードは発生しません。
@@ -105,7 +133,7 @@ label{display:flex;gap:8px;align-items:center;font-size:13.5px;color:var(--ink-2
     <canvas id="cv" width="720" height="720"></canvas>
   </div>
 
-  <h2>④ 結果</h2>
+  <h2>⑤ 結果</h2>
   <div class="card">
     <div class="row" style="margin-bottom:10px">
       <button id="copy">結果をコピー</button>
