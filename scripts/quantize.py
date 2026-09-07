@@ -129,6 +129,68 @@ def _type_map(model: onnx.ModelProto) -> dict[str, int]:
     return types
 
 
+def deduplicate_names(model: onnx.ModelProto) -> onnx.ModelProto:
+    """ノード名と出力テンソル名の重複を解消する。
+
+    onnxconverter_common は、ブロックした演算の前後に挿す Cast を
+    `_input_cast0` / `_output_cast_0` という固定の名前で作る。連番が
+    付かないので、**ブロック対象の演算が複数あると必ず衝突する**。
+    注意機構が何段も並ぶ深度モデルはまさにこれに当たり、onnxruntime が
+    「Duplicate definition of name (_output_cast_0)」で弾く。
+
+    テンソル名の付け替えは、以降の参照も直さなければならない。ONNX の
+    グラフはトポロジ順に並んでいるので、前から順に「いま有効な名前」を
+    引き継ぎながら書き換える（SSA 化と同じ考え方）。
+    """
+    graph_outputs = {o.name for o in model.graph.output}
+    used_names = set()
+    defined = set()
+    current: dict[str, str] = {}
+    serial = 0
+
+    def fresh(prefix: str) -> str:
+        nonlocal serial
+        while True:
+            candidate = f"{prefix}_dedup{serial}"
+            serial += 1
+            if candidate not in defined and candidate not in used_names:
+                return candidate
+
+    renamed_nodes = 0
+    renamed_tensors = 0
+
+    for node in model.graph.node:
+        # 入力は「いま有効な名前」に読み替える
+        for i, name in enumerate(node.input):
+            if name in current:
+                node.input[i] = current[name]
+
+        if node.name:
+            if node.name in used_names:
+                node.name = fresh(node.name)
+                renamed_nodes += 1
+            used_names.add(node.name)
+
+        for i, name in enumerate(node.output):
+            # グラフ出力の名前は外から参照されるので触らない
+            if name in defined and name not in graph_outputs:
+                new = fresh(name)
+                node.output[i] = new
+                current[name] = new
+                defined.add(new)
+                renamed_tensors += 1
+            else:
+                current.pop(name, None)
+                defined.add(name)
+
+    if renamed_nodes or renamed_tensors:
+        print(
+            f"[quantize] 名前の重複を解消しました（ノード {renamed_nodes} / テンソル {renamed_tensors}）",
+            flush=True,
+        )
+    return model
+
+
 def repair_mixed_precision(model: onnx.ModelProto, block_ops: set[str]) -> onnx.ModelProto:
     """浮動小数の型が混ざったノードに Cast を挿して直す。
 
@@ -144,6 +206,24 @@ def repair_mixed_precision(model: onnx.ModelProto, block_ops: set[str]) -> onnx.
     ブロックした演算は fp32 で動かしたいので float に、それ以外は float16 に
     揃える。型推論のやり直しと交互に回し、変化しなくなるまで繰り返す。
     """
+    # 名前は**全周回を通して**一意にする。周回ごとに 0 から振り直すと、
+    # 2周目が 1周目と同じ名前を作り、onnxruntime が
+    # 「two nodes with same node name (repair_cast_0)」で弾く。
+    # 手元の再現モデルは1周で収まったので、この衝突は本物のモデルで
+    # 初めて出た。自己テストでは名前の一意性そのものを見るようにした。
+    used_names = {n.name for n in model.graph.node if n.name}
+    used_tensors = {o for n in model.graph.node for o in n.output}
+    serial = 0
+
+    def unique(prefix: str, pool: set[str]) -> str:
+        nonlocal serial
+        while True:
+            candidate = f"{prefix}_{serial}"
+            serial += 1
+            if candidate not in pool:
+                pool.add(candidate)
+                return candidate
+
     for _ in range(4):
         model = refresh_value_info(model)
         types = _type_map(model)
@@ -165,11 +245,11 @@ def repair_mixed_precision(model: onnx.ModelProto, block_ops: set[str]) -> onnx.
             for slot, name in enumerate(node.input):
                 if types.get(name) not in _FLOAT_TYPES or types.get(name) == target:
                     continue
-                cast_name = f"{name}_fixcast_{len(inserted)}"
+                cast_name = unique(f"{name}_fixcast", used_tensors)
                 inserted.append(
                     onnx.helper.make_node(
                         "Cast", [name], [cast_name], to=target,
-                        name=f"repair_cast_{len(inserted)}",
+                        name=unique("repair_cast", used_names),
                     )
                 )
                 index[cast_name] = pos
@@ -190,15 +270,36 @@ def repair_mixed_precision(model: onnx.ModelProto, block_ops: set[str]) -> onnx.
 
 
 def to_fp16(model: onnx.ModelProto, block_ops: set[str]) -> onnx.ModelProto:
+    """fp16 に変換する。
+
+    **op_block_list は渡さない。** 渡すと onnxconverter_common がブロック対象の
+    前後に Cast を挿すのだが、その実装が壊れている。ブロック対象が複数あると、
+
+      ・挿す Cast の名前が `_input_cast_0` 固定で連番が付かず、必ず衝突する
+      ・2つ目以降のブロック対象ノードが、**自分の入力が作られる前の位置**に
+        置かれ、1つ目の入力を読んでしまう
+
+    という2重の壊れ方をする。名前の衝突は付け替えれば直せるが、順序の狂いは
+    意図した結線が失われているので直せない。実測でも、注意機構ブロックを
+    2段にした時点で出力が fp32 と無相関（相関 −0.14）になった。
+
+    ブロックせずに変換し、型の食い違いは `repair_mixed_precision` で
+    後から揃える。この経路なら 8 段まで相関 0.9999 以上を保つ（実測）。
+
+    数値に敏感な演算（LayerNormalization / Softmax）を守る目的は、
+    **4bit 重み量子化の除外リスト**のほうで果たす。精度が効くのはそちらで、
+    fp16 の丸めは onnxruntime のカーネルが内部で吸収する。
+    """
     from onnxconverter_common import float16
 
     converted = float16.convert_float_to_float16(
         model,
         keep_io_types=True,  # 入出力は fp32 のまま。呼び出し側の前後処理を単純に保つ
         disable_shape_infer=False,
-        op_block_list=sorted(block_ops),
     )
-    return repair_mixed_precision(converted, block_ops)
+    # 名前の重複はこの経路では出ないはずだが、変換器の実装に依存する話なので
+    # 保険として残す。出たら気付けるよう、直した件数を出す。
+    return repair_mixed_precision(deduplicate_names(converted), block_ops)
 
 
 def quantize_q4f16(src: Path, dst: Path, cfg: dict[str, Any]) -> None:
