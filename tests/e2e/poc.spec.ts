@@ -109,16 +109,17 @@ test.describe('PoC-1 ハーネス', () => {
     const big = bench.find((b) => b.splatCount === 60_000);
     expect(big, '60,000 個の結果がありません').toBeTruthy();
 
-    // 背面カリングが効いていること。全部描いていたら法線かカリングが壊れている。
-    expect(big!.drawnSplats).toBeGreaterThan(0);
-    expect(big!.drawnSplats).toBeLessThan(60_000);
-    // 球殻に撒いたサーフェルなので、おおよそ半分が裏を向く
     const cullRatio = 1 - big!.drawnSplats / 60_000;
-    expect(cullRatio).toBeGreaterThan(0.25);
-    expect(cullRatio).toBeLessThan(0.75);
-
+    // アサーションの前に記録する。失敗しても数値を残したいため。
     metrics['renderBench'] = bench;
     metrics['cullRatio'] = cullRatio;
     save();
+
+    // カリングが動いていること。0% なら法線かカリングが壊れており、
+    // 100% なら何も描けていない。ベンチの球殻は視錐台からはみ出すので、
+    // 背面カリング（約50%）に視錐台カリングが上乗せされる。
+    expect(big!.drawnSplats).toBeGreaterThan(0);
+    expect(cullRatio).toBeGreaterThan(0.25);
+    expect(cullRatio).toBeLessThan(0.98);
   });
 });
