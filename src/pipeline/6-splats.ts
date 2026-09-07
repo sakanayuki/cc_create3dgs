@@ -17,6 +17,7 @@
 import { encodeOct, packHalf2, packRgba8 } from '../codec/pack';
 import { SPLAT_BYTES } from '../render/SplatRenderer';
 import { distanceTransform } from './geometry/distanceTransform';
+import { exposedBandPx } from './8-inpaint';
 import type { CellMap } from './7-sample';
 
 /** 被写体とみなす α。 */
@@ -161,6 +162,11 @@ export function buildSplats(
   thickness: Float32Array | null,
   backColorPlane: ArrayLike<number> | null,
   params: BuildParams = DEFAULT_BUILD_PARAMS,
+  /**
+   * スカートの色を採るプレーン（⑧ のインペイント結果、RGBA8）。
+   * 無ければ奥側の色を伸ばす（v1 方式の縮退、docs/03 §3.7）。
+   */
+  skirtColorPlane: ArrayLike<number> | null = null,
 ): SplatBuild {
   const { cells, normals, width, height, focalPx, nearZ, farZ } = input;
   const cx = input.cx ?? width / 2;
@@ -357,15 +363,23 @@ export function buildSplats(
         const gl = Math.hypot(gx, gy) || 1;
         const wallN: [number, number, number] = [gx / gl, gy / gl, 0];
 
-        // 色は段差の奥側の画素から採る（インペイントが無いときの縮退）。
-        const fi = (y + gy) * width + (x + gx);
-        const cr = color[fi * 4] as number;
-        const cg = color[fi * 4 + 1] as number;
-        const cb = color[fi * 4 + 2] as number;
+        // 視点を振ったときに、この段差の奥側が何画素ぶん露出するか。
+        // スカートの各枚は、露出した先の色を持つべきなので、
+        // 帯の中のどこに当たるかで色を採る位置を変える。
+        const band = exposedBandPx(focalPx, zNear, zFar, (45 * Math.PI) / 180);
+        const src = skirtColorPlane ?? color;
 
         for (let s = 1; s <= steps; s++) {
           const t = s / (steps + 1);
           const z = zNear + t * (zFar - zNear);
+          // 奥へ行くほど、段差から遠い位置の色になる。
+          const off = Math.round(t * band);
+          const sx = Math.max(0, Math.min(width - 1, x + gx * off));
+          const sy = Math.max(0, Math.min(height - 1, y + gy * off));
+          const fi = sy * width + sx;
+          const cr = src[fi * 4] as number;
+          const cg = src[fi * 4 + 1] as number;
+          const cb = src[fi * 4 + 2] as number;
           // 奥へ行くほど薄くする。奥の端まで不透明だと、そこに板が
           // 見えてしまう（塞ぎたいのは隙間であって、面を足したいのではない）。
           const fade = 1 - t;

@@ -15,6 +15,12 @@ import { buildSplats, DEFAULT_BUILD_PARAMS, type BuildParams, type SplatBuild } 
 import { adaptiveSample, solveSamplingParams, samplingReduction } from './7-sample';
 import { refineMatte } from './1-matte';
 import { prepareImage, WORKING_GRID, type Letterbox } from './0-preprocess';
+import {
+  buildInpaintMask,
+  compositeInpaint,
+  stretchFallback,
+  type InpaintMask,
+} from './8-inpaint';
 import { IMAGENET_MEAN, IMAGENET_STD, minMax, resizePlane, resizeRgba, toTensorNCHW } from './imageOps';
 import { createSession, type Backend } from '../runtime/OrtSession';
 import { resolveModel, type HfFallback } from '../runtime/modelCatalog';
@@ -35,6 +41,8 @@ export interface GenerateOptions {
   /** プレビューができた時点で1回呼ばれる。 */
   readonly onPreview?: (build: SplatBuild) => void;
   readonly params?: Partial<BuildParams>;
+  /** ⑧ のインペイントを行うか。軽量プリセットは false（docs/04 §4.7）。 */
+  readonly inpaint?: boolean;
 }
 
 export const DEFAULT_GENERATE_OPTIONS: Omit<GenerateOptions, 'backend'> = {
@@ -59,6 +67,8 @@ export interface GenerateResult {
     readonly timings: Record<string, number>;
     /** 深度モデルが内部パラメータを返したか。返さなければ画角を仮定している。 */
     readonly intrinsicsFromModel: boolean;
+    /** ⑧ で何を使ったか。mi-gan が本命、stretch は縮退、skipped は段差なし。 */
+    readonly inpaint: 'mi-gan' | 'stretch' | 'skipped';
   };
 }
 
@@ -208,6 +218,72 @@ async function runDepth(
   return { raw: full, kind: isInverse ? 'inverse-depth' : 'depth', focalPx };
 }
 
+/**
+ * ⑧ 遮蔽部のインペイント（docs/03 §3.7）。
+ *
+ * MI-GAN が読めなければ v1 方式（奥側の色の引き伸ばし）に落とす。
+ * 落ちても生成は続く。プレビューは元からその色で出ているので、
+ * 利用者から見れば「差し替えが起きない」だけになる（docs/03 §3.7 の縮退）。
+ */
+async function runInpaint(
+  rgba: Uint8ClampedArray,
+  masked: InpaintMask,
+  grid: number,
+  backend: Backend,
+): Promise<{ plane: Uint8ClampedArray; used: 'mi-gan' | 'stretch' }> {
+  const fallback = (): { plane: Uint8ClampedArray; used: 'stretch' } => ({
+    plane: stretchFallback(rgba, masked.mask, grid, grid),
+    used: 'stretch',
+  });
+  if (masked.maskedPixels === 0) return fallback();
+
+  try {
+    const size = 512;
+    const session = await loadModel('mi-gan', backend, {
+      repo: 'andraniksargsyan/migan',
+      file: 'migan_pipeline_v2.onnx',
+    });
+
+    const small = resizeRgba(rgba, grid, grid, size, size);
+    const maskSmall = resizePlane(masked.mask, grid, grid, size, size);
+    // MI-GAN の pipeline v2 は uint8 の画像とマスクを取る。
+    // マスクは「残す＝255 / 描く＝0」の約束なので、こちらの向きと逆になる。
+    const image = new Uint8Array(3 * size * size);
+    const maskTensor = new Uint8Array(size * size);
+    for (let i = 0; i < size * size; i++) {
+      image[i] = small[i * 4] as number;
+      image[size * size + i] = small[i * 4 + 1] as number;
+      image[2 * size * size + i] = small[i * 4 + 2] as number;
+      maskTensor[i] = (maskSmall[i] as number) >= 128 ? 0 : 255;
+    }
+
+    const feeds: Record<string, ort.Tensor> = {};
+    const names = session.inputNames;
+    feeds[names[0] as string] = new ort.Tensor('uint8', image, [1, 3, size, size]);
+    if (names[1]) feeds[names[1]] = new ort.Tensor('uint8', maskTensor, [1, 1, size, size]);
+
+    const out = await session.run(feeds);
+    const t = pickOutput(out, session, 'output', 'result');
+    const data = t.data as unknown as Uint8Array | Float32Array;
+    const side = Math.round(Math.sqrt(data.length / 3));
+
+    // NCHW の uint8（または 0..1 の float）で返る。RGBA へ直す。
+    const painted = new Uint8ClampedArray(side * side * 4);
+    const isFloat = !(data instanceof Uint8Array);
+    for (let i = 0; i < side * side; i++) {
+      for (let c = 0; c < 3; c++) {
+        const v = data[c * side * side + i] as number;
+        painted[i * 4 + c] = isFloat ? v * 255 : v;
+      }
+      painted[i * 4 + 3] = 255;
+    }
+    const full = resizeRgba(painted, side, side, grid, grid);
+    return { plane: compositeInpaint(rgba, full, masked.mask, grid, grid, 2), used: 'mi-gan' };
+  } catch {
+    return fallback();
+  }
+}
+
 /** 画角 55° を仮定したときの焦点距離。モデルが内部パラメータを返さないときの予備。 */
 function assumedFocal(grid: number): number {
   return grid / (2 * Math.tan((55 * Math.PI) / 180 / 2));
@@ -282,25 +358,42 @@ export async function generate(photo: Blob, options: GenerateOptions): Promise<G
   );
 
   const buildParams: BuildParams = { ...DEFAULT_BUILD_PARAMS, ...opts.params };
-  const build = await mark('スプラット組み立て', () =>
-    buildSplats(
-      {
-        cells,
-        normals,
-        width: grid,
-        height: grid,
-        focalPx,
-        nearZ: calibrated.nearZ,
-        farZ: calibrated.farZ,
-      },
-      rgba,
-      alpha,
-      thickness,
-      null,
-      buildParams,
-    ),
+  const camera = {
+    cells,
+    normals,
+    width: grid,
+    height: grid,
+    focalPx,
+    nearZ: calibrated.nearZ,
+    farZ: calibrated.farZ,
+  };
+
+  // まずインペイント無しで1枚作って見せる（docs/03 §3.1 のプレビュー）。
+  // 待たせるより、粗くても先に立体を出すほうが体感が速い。
+  const preview = await mark('スプラット組み立て', () =>
+    buildSplats(camera, rgba, alpha, thickness, null, buildParams),
   );
-  opts.onPreview?.(build);
+  opts.onPreview?.(preview);
+
+  let build = preview;
+  let inpaintUsed: 'mi-gan' | 'stretch' | 'skipped' = 'skipped';
+
+  if (opts.inpaint !== false) {
+    report(0.94, '隠れていた部分を描いています');
+    const masked = await mark('インペイントのマスク', () =>
+      buildInpaintMask(depth01, alpha, grid, grid, focalPx, calibrated.nearZ, calibrated.farZ),
+    );
+    if (masked.maskedPixels > 0) {
+      const painted = await mark('インペイント', () =>
+        runInpaint(rgba, masked, grid, opts.backend),
+      );
+      inpaintUsed = painted.used;
+      // スカートの色だけが変わるので、組み立て直す。
+      build = await mark('スカート色の差し替え', () =>
+        buildSplats(camera, rgba, alpha, thickness, null, buildParams, painted.plane),
+      );
+    }
+  }
 
   report(1, '完成しました');
   return {
@@ -313,6 +406,7 @@ export async function generate(photo: Blob, options: GenerateOptions): Promise<G
       reduction: samplingReduction(cells),
       timings,
       intrinsicsFromModel: depthOut.focalPx !== null,
+      inpaint: inpaintUsed,
     },
   };
 }

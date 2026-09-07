@@ -16,10 +16,11 @@ import { Viewer } from './viewer';
 export type Preset = 'light' | 'standard' | 'high';
 
 /** docs/04 §4.7 の品質プリセット。 */
-const PRESETS: Record<Preset, { grid: number; reduction: number; label: string }> = {
-  light: { grid: LIGHT_GRID, reduction: 0.45, label: '軽量' },
-  standard: { grid: WORKING_GRID, reduction: 0.3, label: '標準' },
-  high: { grid: WORKING_GRID, reduction: 0, label: '高品質' },
+const PRESETS: Record<Preset, { grid: number; reduction: number; inpaint: boolean; label: string }> = {
+  // 軽量はインペイントを行わない（docs/04 §4.7）。奥側の色を伸ばすだけになる。
+  light: { grid: LIGHT_GRID, reduction: 0.45, inpaint: false, label: '軽量' },
+  standard: { grid: WORKING_GRID, reduction: 0.3, inpaint: true, label: '標準' },
+  high: { grid: WORKING_GRID, reduction: 0, inpaint: true, label: '高品質' },
 };
 
 const $ = <T extends HTMLElement>(id: string): T => {
@@ -85,6 +86,20 @@ function setProgress(fraction: number, label: string): void {
   $('stage').textContent = label;
 }
 
+/** ビューアは1つだけ作って使い回す。作り直すと GPU の資源を無駄に取り直す。 */
+async function ensureViewer(): Promise<Viewer> {
+  if (state.viewer) return state.viewer;
+  const viewer = new Viewer({
+    canvas: $<HTMLCanvasElement>('cv'),
+    onBackend: (b, why) => {
+      $('renderInfo').textContent = why ? `${b}（WebGPU 不可: ${why}）` : b;
+    },
+  });
+  await viewer.init();
+  state.viewer = viewer;
+  return viewer;
+}
+
 async function run(file: File): Promise<void> {
   if (state.busy) return;
   state.busy = true;
@@ -100,33 +115,30 @@ async function run(file: File): Promise<void> {
     const cap = state.capability ?? (await detectCapability());
     const preset = PRESETS[currentPreset()];
 
+    // ビューアは生成を始める前に用意する。プレビューが出来た瞬間に
+    // 表示したいので、ここで作っておかないと最初の1枚を捨てることになる。
+    const viewer = await ensureViewer();
+
     const result = await generate(file, {
       mode: currentMode(),
       grid: preset.grid,
       reduction: preset.reduction,
+      inpaint: preset.inpaint,
       backend: inferenceBackend(cap),
       onProgress: setProgress,
+      // プレビューができた時点で先に見せる（docs/03 §3.1）。
+      // インペイントを待たずに立体が出る。
+      onPreview: (b) => {
+        show('view');
+        viewer.resize();
+        viewer.setSplats(b.data, b.count, b.nearZ, b.farZ);
+      },
     });
     state.result = result;
 
     show('view');
-    if (!state.viewer) {
-      const viewer = new Viewer({
-        canvas: $<HTMLCanvasElement>('cv'),
-        onBackend: (b, why) => {
-          $('renderInfo').textContent = why ? `${b}（WebGPU 不可: ${why}）` : b;
-        },
-      });
-      await viewer.init();
-      state.viewer = viewer;
-    }
-    state.viewer.resize();
-    state.viewer.setSplats(
-      result.build.data,
-      result.build.count,
-      result.build.nearZ,
-      result.build.farZ,
-    );
+    viewer.resize();
+    viewer.setSplats(result.build.data, result.build.count, result.build.nearZ, result.build.farZ);
 
     const t = result.stats.timings;
     const total = Object.values(t).reduce((a, b) => a + b, 0);
@@ -139,7 +151,9 @@ async function run(file: File): Promise<void> {
        </div>
        <p class="note">焦点距離 ${result.stats.focalPx.toFixed(0)} px（${
          result.stats.intrinsicsFromModel ? 'モデルの推定値' : '画角 55° の仮定'
-       }）</p>
+       }） / 遮蔽部の補完: ${
+         { 'mi-gan': 'MI-GAN', stretch: '引き伸ばし（縮退）', skipped: '不要' }[result.stats.inpaint]
+       }</p>
        <details><summary>工程ごとの時間</summary><pre class="mono">${esc(
          Object.entries(t)
            .map(([k, v]) => `${k.padEnd(16, '　')} ${String(v).padStart(6)} ms`)
