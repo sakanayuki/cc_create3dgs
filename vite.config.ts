@@ -44,8 +44,8 @@ export default defineConfig({
     },
   },
   worker: { format: 'es' },
-  // .wgsl をソースコードとして読み込む
-  assetsInclude: ['**/*.wgsl'],
+  // シェーダをソースコードとして読み込む
+  assetsInclude: ['**/*.wgsl', '**/*.vert', '**/*.frag'],
   test: {
     // E2E は Playwright が担当するので Vitest からは外す
     include: ['tests/unit/**/*.test.ts'],

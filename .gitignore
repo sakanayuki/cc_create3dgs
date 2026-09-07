@@ -10,6 +10,9 @@ public/models/
 public/ort/
 *.onnx
 *.onnx_data
+# 例外: PoC-2 のスレッド計測に使う合成モデル。scripts/make_threadbench.py が
+# 決定的に生成する小さなファイルなので、リポジトリに入れて CI での再生成を省く。
+!public/threadbench.onnx
 
 # 実測ログの作業ファイル
 scratch/
