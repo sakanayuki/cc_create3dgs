@@ -8,6 +8,7 @@ import {
   CANDIDATES,
   benchRender,
   benchThreads,
+  buildPipelineSplats,
   makeProceduralSplats,
   probePixels,
   syntheticThreadTarget,
@@ -507,7 +508,8 @@ declare global {
       probePixels: typeof probePixels;
       createRenderer: typeof createRenderer;
       makeProceduralSplats: typeof makeProceduralSplats;
+      buildPipelineSplats: typeof buildPipelineSplats;
     };
   }
 }
-window.__photosplat = { probePixels, createRenderer, makeProceduralSplats };
+window.__photosplat = { probePixels, createRenderer, makeProceduralSplats, buildPipelineSplats };

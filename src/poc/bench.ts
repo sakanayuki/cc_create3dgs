@@ -11,6 +11,10 @@ import { SPLAT_BYTES } from '../render/SplatRenderer';
 import { createRenderer, type RendererBackend } from '../render/createRenderer';
 import { createSession, type Backend, type ModelSource } from '../runtime/OrtSession';
 import { encodeOct, packHalf2, packRgba8 } from '../codec/pack';
+import { estimateNormals } from '../pipeline/3-calibrate';
+import { buildSplats, type SplatBuild } from '../pipeline/6-splats';
+import { adaptiveSample, solveSamplingParams } from '../pipeline/7-sample';
+import { thicknessMap } from '../pipeline/4-shell';
 
 const HF = 'https://huggingface.co';
 const hf = (repo: string, path: string) => `${HF}/${repo}/resolve/main/${path}`;
@@ -529,4 +533,59 @@ export async function probePixels(
   } finally {
     renderer.dispose();
   }
+}
+
+/**
+ * 合成した被写体を**本物のパイプラインに通して**スプラットを作る。
+ *
+ * `makeProceduralSplats` は描画の速度を測るためのもので、パイプラインを
+ * 一切通らない。こちらは 深度較正 → 法線推定 → 適応サンプリング →
+ * シェル組み立て を実際に走らせるので、座標系の取り違えのような
+ * 「繋いでみて初めて分かる」不具合が実機でも出る。
+ */
+export function buildPipelineSplats(size = 256, reduction = 0.3): SplatBuild {
+  const nearZ = 1.0;
+  const farZ = 1.5;
+  const focalPx = size * 1.25;
+
+  const depth = new Float32Array(size * size);
+  const color = new Uint8ClampedArray(size * size * 4);
+  const alpha = new Uint8ClampedArray(size * size);
+
+  // 縦長の楕円体（人物のつもり）。表面に細かい起伏を載せる。
+  const rx = size * 0.30;
+  const ry = size * 0.40;
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const i = y * size + x;
+      const dx = (x - size / 2) / rx;
+      const dy = (y - size / 2) / ry;
+      const rr = dx * dx + dy * dy;
+      if (rr > 1) continue;
+      alpha[i] = 255;
+      const bulge = Math.sqrt(1 - rr);
+      depth[i] = 0.75 - 0.45 * bulge + 0.006 * Math.sin(x * 0.5) * Math.sin(y * 0.45);
+      const shade = 110 + 110 * bulge;
+      color[i * 4] = shade;
+      color[i * 4 + 1] = shade * 0.78;
+      color[i * 4 + 2] = shade * 0.68;
+      color[i * 4 + 3] = 255;
+    }
+  }
+
+  const metric = new Float32Array(size * size);
+  for (let i = 0; i < metric.length; i++) metric[i] = nearZ + (depth[i] as number) * (farZ - nearZ);
+  const normals = estimateNormals(metric, size, size, focalPx, 0.08);
+
+  const params = solveSamplingParams(depth, color, alpha, size, size, reduction);
+  const cells = adaptiveSample(depth, color, alpha, size, size, params);
+  const thickness = thicknessMap(alpha, size, size, { maxThickness: 0.35, profile: 'ellipsoid' });
+
+  return buildSplats(
+    { cells, normals, width: size, height: size, focalPx, nearZ, farZ },
+    color,
+    alpha,
+    thickness,
+    null,
+  );
 }
