@@ -25,6 +25,10 @@ jobs:
         with: { python-version: '3.11', cache: pip }
       - run: pip install -q -r scripts/requirements.txt
 
+      - name: 量子化の自己テスト
+        # 本物のモデルを取りに行く前に、小さなモデルで壊れていないか見る。
+        run: python scripts/test_quantize.py
+
       - name: base 側と head 側の両方で量子化して比較
         run: |
           git worktree add /tmp/base ${{ github.event.pull_request.base.sha }}

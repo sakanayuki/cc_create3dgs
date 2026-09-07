@@ -75,15 +75,130 @@ def save_model(model: onnx.ModelProto, path: Path) -> None:
         )
 
 
+def _clear_value_info(graph: onnx.GraphProto) -> None:
+    """中間テンソルの型宣言を、入れ子のサブグラフまで含めて捨てる。"""
+    del graph.value_info[:]
+    for node in graph.node:
+        for attr in node.attribute:
+            if attr.HasField("g"):
+                _clear_value_info(attr.g)
+            for sub in attr.graphs:
+                _clear_value_info(sub)
+
+
+def refresh_value_info(model: onnx.ModelProto) -> onnx.ModelProto:
+    """中間テンソルの型宣言を、実際のノードから付け直す。
+
+    fp16 変換のあとに必ず必要になる。onnxconverter_common は value_info を
+    まとめて float16 に書き換えるが、`to=FLOAT` を持つ Cast ノードは
+    変換後も float を出す。宣言と実体が食い違ったまま保存されるため、
+    onnxruntime が読み込み時に弾く。
+
+        Type Error: Type (tensor(float16)) of output arg (…/attn/Cast_2) of
+        node (…/attn/Cast_2) does not match expected type (tensor(float)).
+
+    グラフ自体は正しいので、宣言を捨てて推論し直せば直る。
+    """
+    _clear_value_info(model.graph)
+    try:
+        return onnx.shape_inference.infer_shapes(model, strict_mode=False, data_prop=True)
+    except Exception as e:  # 推論できなくても、宣言が空なら実行時に困らない
+        print(f"[quantize] 形状推論をやり直せませんでした（続行します）: {e}", file=sys.stderr)
+        return model
+
+
+# 入力の型が揃っていなければならない演算。ONNX の型制約で、
+# 浮動小数の入力すべてが同じ型パラメータに束縛される。
+_SAME_FLOAT_INPUT_OPS = {
+    "Add", "Sub", "Mul", "Div", "Pow", "Min", "Max", "Mean", "Sum",
+    "MatMul", "Gemm", "Concat", "Where", "Equal", "Greater", "Less",
+    "GreaterOrEqual", "LessOrEqual", "Mod", "PRelu", "BiasGelu",
+}
+_FLOAT_TYPES = {onnx.TensorProto.FLOAT, onnx.TensorProto.FLOAT16}
+
+
+def _type_map(model: onnx.ModelProto) -> dict[str, int]:
+    """テンソル名 → 要素型。推論できた範囲で集める。"""
+    types: dict[str, int] = {}
+    for init in model.graph.initializer:
+        types[init.name] = init.data_type
+    for group in (model.graph.input, model.graph.output, model.graph.value_info):
+        for vi in group:
+            if vi.type.HasField("tensor_type"):
+                types[vi.name] = vi.type.tensor_type.elem_type
+    return types
+
+
+def repair_mixed_precision(model: onnx.ModelProto, block_ops: set[str]) -> onnx.ModelProto:
+    """浮動小数の型が混ざったノードに Cast を挿して直す。
+
+    onnxconverter_common の fp16 変換は、**モデルに元からある Cast ノードの
+    `to` 属性を書き換えない**。注意機構では数値安定性のために
+    `Cast(to=FLOAT) → Softmax` を明示的に置くのが定石なので、変換後に
+    「float のテンソル」と「float16 になった重み」が同じ MatMul に入る、
+    という壊れたグラフができる。onnxruntime は読み込み時にこう言って弾く。
+
+        Type Error: Type parameter (T) of Optype (MatMul) bound to
+        different types (tensor(float) and tensor(float16))
+
+    ブロックした演算は fp32 で動かしたいので float に、それ以外は float16 に
+    揃える。型推論のやり直しと交互に回し、変化しなくなるまで繰り返す。
+    """
+    for _ in range(4):
+        model = refresh_value_info(model)
+        types = _type_map(model)
+        inserted: list[onnx.NodeProto] = []
+        index: dict[str, int] = {}
+
+        for pos, node in enumerate(model.graph.node):
+            if node.op_type not in _SAME_FLOAT_INPUT_OPS:
+                continue
+            kinds = {types.get(i) for i in node.input if types.get(i) in _FLOAT_TYPES}
+            if len(kinds) < 2:
+                continue
+
+            target = (
+                onnx.TensorProto.FLOAT
+                if node.op_type in block_ops
+                else onnx.TensorProto.FLOAT16
+            )
+            for slot, name in enumerate(node.input):
+                if types.get(name) not in _FLOAT_TYPES or types.get(name) == target:
+                    continue
+                cast_name = f"{name}_fixcast_{len(inserted)}"
+                inserted.append(
+                    onnx.helper.make_node(
+                        "Cast", [name], [cast_name], to=target,
+                        name=f"repair_cast_{len(inserted)}",
+                    )
+                )
+                index[cast_name] = pos
+                node.input[slot] = cast_name
+
+        if not inserted:
+            return model
+
+        # 挿した Cast は、使う側のノードの直前に置く。
+        nodes = list(model.graph.node)
+        for cast in sorted(inserted, key=lambda n: index[n.output[0]], reverse=True):
+            nodes.insert(index[cast.output[0]], cast)
+        del model.graph.node[:]
+        model.graph.node.extend(nodes)
+        print(f"[quantize] 型の食い違いを {len(inserted)} 箇所直しました", flush=True)
+
+    return refresh_value_info(model)
+
+
 def to_fp16(model: onnx.ModelProto, block_ops: set[str]) -> onnx.ModelProto:
     from onnxconverter_common import float16
 
-    return float16.convert_float_to_float16(
+    converted = float16.convert_float_to_float16(
         model,
         keep_io_types=True,  # 入出力は fp32 のまま。呼び出し側の前後処理を単純に保つ
         disable_shape_infer=False,
         op_block_list=sorted(block_ops),
     )
+    return repair_mixed_precision(converted, block_ops)
 
 
 def quantize_q4f16(src: Path, dst: Path, cfg: dict[str, Any]) -> None:
@@ -158,6 +273,27 @@ def quantize_fp16(src: Path, dst: Path, cfg: dict[str, Any]) -> None:
 QUANTIZERS = {"q4f16": quantize_q4f16, "uint8": quantize_uint8, "fp16": quantize_fp16}
 
 
+def verify_loadable(path: Path) -> str | None:
+    """作ったモデルを onnxruntime で実際に読み込んでみる。
+
+    量子化は「ファイルはできたが読めない」形で壊れうる。実際、fp16 変換が
+    Cast ノードを見落として型の食い違うグラフを作り、CI はそれを配布物に
+    含めたまま先へ進んで、後の工程で初めて落ちた。作った直後にここで
+    読んでおけば、どのモデルのどの方式が壊れたのかがその場で分かる。
+
+    @return エラーメッセージ。読めれば None。
+    """
+    try:
+        import onnxruntime as ort
+
+        opts = ort.SessionOptions()
+        opts.log_severity_level = 3
+        ort.InferenceSession(str(path), opts, providers=["CPUExecutionProvider"])
+        return None
+    except Exception as e:  # 読めないこと自体が結果なので、種類は問わない
+        return str(e).splitlines()[0][:300]
+
+
 def build_one(
     m: Model, mode: str, raw_dir: Path, out_dir: Path, force: bool
 ) -> dict[str, Any]:
@@ -189,10 +325,17 @@ def build_one(
         info["error"] = f"元モデルが見つかりません: {src}"
         return info
 
+    # 読めないファイルを配布物に混ぜない。ここで止めれば原因がその場で分かる。
+    load_error = verify_loadable(dst)
+    if load_error:
+        info["error"] = f"{mode} のモデルを読み込めません: {load_error}"
+        print(f"[quantize] {m.id}/{mode}: 読み込み失敗 — {load_error}", file=sys.stderr)
+        return info
+
     size = dst.stat().st_size
     info["bytes"] = size
     info["sha256"] = sha256_of(dst)
-    print(f"[quantize] {m.id}/{mode}: {size/1e6:.1f} MB ({info['source']})", flush=True)
+    print(f"[quantize] {m.id}/{mode}: {size/1e6:.1f} MB ({info['source']}, 読み込み確認済み)", flush=True)
     return info
 
 
