@@ -125,7 +125,8 @@ label{display:flex;gap:8px;align-items:center;font-size:13.5px;color:var(--ink-2
   <div class="card">
     <p class="k" style="margin:0 0 10px">
       手続き的に作ったサーフェルを回して、フレーム時間の中央値を測ります。ダウンロードは発生しません。
-      標準プリセットの 42万で 60fps（16.6ms）に収まるかが判断点です。
+      <b>WebGPU が無い端末では WebGL2 で測ります。</b>
+      判断点は標準プリセットの 42万で、WebGPU なら 60fps（16.6ms）、WebGL2 なら 30fps（33.3ms）です。
     </p>
     <div class="row"><button id="runRender">描画ベンチを実行</button></div>
     <div class="bar" id="renderBar"><i></i></div>

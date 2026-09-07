@@ -16,6 +16,7 @@ import {
   type ThreadTarget,
 } from './bench';
 import type { ThreadTestResponse } from './threadWorker';
+import { createRenderer } from '../render/createRenderer';
 import { detectCapability, describeCapability, type Capability } from '../runtime/capability';
 import {
   disableCrossOriginIsolation,
@@ -254,52 +255,57 @@ const BENCH_COUNTS = (params.get('counts') ?? '99000,240000,424000,549000')
 const BENCH_FRAMES = Math.max(4, Number.parseInt(params.get('frames') ?? '90', 10) || 90);
 
 async function runRenderBench(): Promise<void> {
-  const cap = state.capability ?? (await showCapability());
   const out = $('renderOut');
-  if (!cap.webgpu.supported) {
-    out.innerHTML = '<span class="pill ng">WebGPU が無いので実行できません</span>';
-    return;
-  }
-  const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
-  if (!adapter) {
-    out.innerHTML = '<span class="pill ng">アダプタを取得できませんでした</span>';
-    return;
-  }
-  const device = await adapter.requestDevice();
-  device.lost.then((info) => {
-    out.innerHTML += `<div><span class="pill ng">デバイス消失</span> ${esc(info.message)}</div>`;
-  });
-
   const canvas = $<HTMLCanvasElement>('cv');
   const bar = $('renderBar').firstElementChild as HTMLElement;
   state.render = [];
   out.innerHTML = '';
 
+  // WebGPU が無くても WebGL2 で測れる（決定 D19）。どちらで測ったかは結果に残る。
+  let backendLabel: string;
+  try {
+    const probe = await createRenderer({ canvas });
+    backendLabel = probe.backend;
+    if (probe.fallbackReason) {
+      out.innerHTML =
+        `<div class="k">WebGPU が使えないため WebGL2 で測ります（${esc(probe.fallbackReason)}）</div>`;
+    } else {
+      out.innerHTML = `<div class="k">${probe.backend} で測ります</div>`;
+    }
+    probe.renderer.dispose();
+  } catch (e) {
+    out.innerHTML = `<span class="pill ng">描画できません</span> <span class="mono">${esc(String(e))}</span>`;
+    return;
+  }
+
+  // WebGL2 は WebGPU より遅いので、60fps ではなく 30fps を目標にする（docs/01 §1.4）
+  const targetMs = backendLabel === 'webgpu' ? 16.6 : 33.3;
+  const targetLabel = backendLabel === 'webgpu' ? '60fps' : '30fps';
+
   for (let i = 0; i < BENCH_COUNTS.length; i++) {
     const n = BENCH_COUNTS[i] as number;
     bar.style.width = `${((i + 0.5) / BENCH_COUNTS.length) * 100}%`;
-    out.innerHTML += `<div class="k">${n.toLocaleString('ja-JP')} 個 … 実行中</div>`;
+    out.innerHTML += `<div class="k" data-running="${n}">${n.toLocaleString('ja-JP')} 個 … 実行中</div>`;
     let r: RenderBenchResult;
     try {
-      r = await benchRender(device, canvas, n, BENCH_FRAMES);
+      r = await benchRender(canvas, n, BENCH_FRAMES);
     } catch (e) {
       out.innerHTML += `<div><span class="pill ng">失敗</span> ${esc(String(e))}</div>`;
       break;
     }
     state.render.push(r);
-    const good = r.frameMs <= 16.6;
-    out.lastElementChild?.remove();
+    const good = r.frameMs <= targetMs;
+    document.querySelector(`[data-running="${n}"]`)?.remove();
     out.innerHTML +=
       `<div class="row" style="gap:8px">
-         <span class="pill ${good ? 'ok' : 'ng'}">${good ? '60fps 可' : '60fps 不可'}</span>
+         <span class="pill ${good ? 'ok' : 'ng'}">${good ? `${targetLabel} 可` : `${targetLabel} 不可`}</span>
          <span class="mono">${n.toLocaleString('ja-JP')} 個 — ${r.frameMs} ms / ${r.fps} fps
-         （描画 ${r.drawnSplats.toLocaleString('ja-JP')}、カリング ${(r.cullRatio * 100).toFixed(0)}%）</span>
+         （${r.backend}、描画 ${r.drawnSplats.toLocaleString('ja-JP')}、カリング ${(r.cullRatio * 100).toFixed(0)}%）</span>
        </div>`;
     dumpResults();
     await new Promise((res) => setTimeout(res, 60));
   }
   bar.style.width = '100%';
-  device.destroy();
 }
 
 // --- ④ 結果 -----------------------------------------------------------------
@@ -388,10 +394,16 @@ function verdicts(): Record<string, string> {
   }
 
   const std = state.render.find((r) => r.splatCount === 424_000);
-  if (!std) v['R12'] = '未検証';
-  else v['R12'] = std.frameMs <= 16.6
-    ? `OK — 42万で ${std.frameMs}ms（${std.fps}fps）。1024² を既定にできる`
-    : `NG — 42万で ${std.frameMs}ms（${std.fps}fps）。既定を 768² に落とすか LOD 前提にする`;
+  if (!std) {
+    v['R12'] = '未検証';
+  } else {
+    // WebGPU は 60fps、WebGL2 は 30fps を目標にする（docs/01 §1.4）
+    const target = std.backend === 'webgpu' ? 16.6 : 33.3;
+    const label = std.backend === 'webgpu' ? '60fps' : '30fps';
+    v['R12'] = std.frameMs <= target
+      ? `OK（${std.backend}）— 42万で ${std.frameMs}ms / ${std.fps}fps。${label} 目標を満たし 1024² を既定にできる`
+      : `NG（${std.backend}）— 42万で ${std.frameMs}ms / ${std.fps}fps。${label} 目標に届かないので既定を 768² に落とすか LOD 前提にする`;
+  }
   return v;
 }
 

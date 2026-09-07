@@ -8,7 +8,7 @@
  */
 import * as ort from 'onnxruntime-web';
 import { SPLAT_BYTES } from '../render/SplatRenderer';
-import { WgslSplatRenderer } from '../render/backends/wgsl';
+import { createRenderer, type RendererBackend } from '../render/createRenderer';
 import { createSession, type Backend, type ModelSource } from '../runtime/OrtSession';
 import { encodeOct, packHalf2, packRgba8 } from '../codec/pack';
 
@@ -347,6 +347,8 @@ export async function benchThreads(
 
 export interface RenderBenchResult {
   splatCount: number;
+  /** どちらのバックエンドで測ったか。 */
+  backend: RendererBackend;
   /** 中央値フレーム時間（ミリ秒）。 */
   frameMs: number;
   fps: number;
@@ -388,12 +390,12 @@ export function makeProceduralSplats(count: number): Uint8Array {
 }
 
 export async function benchRender(
-  device: GPUDevice,
   canvas: HTMLCanvasElement,
   splatCount: number,
   frames = 90,
+  force?: RendererBackend,
 ): Promise<RenderBenchResult> {
-  const renderer = new WgslSplatRenderer({ device, canvas });
+  const { renderer, backend } = await createRenderer({ canvas, ...(force ? { force } : {}) });
   try {
     renderer.resize(canvas.clientWidth * devicePixelRatio || 720, canvas.clientHeight * devicePixelRatio || 720);
     renderer.setSplats(makeProceduralSplats(splatCount), splatCount);
@@ -407,8 +409,8 @@ export async function benchRender(
       renderer.setCamera({ yaw, pitch: 0.1, distance: 1.0, target: [0, 0, 0] });
       const t = performance.now();
       renderer.render();
-      // GPU の完了を待つ。onSubmittedWorkDone が実測に最も近い。
-      await device.queue.onSubmittedWorkDone();
+      // GPU 側の完了を待つ。待ち方はバックエンドごとに renderer が知っている。
+      await renderer.flush();
       const dt = performance.now() - t;
       if (i >= warmup) times.push(dt);
     }
@@ -416,6 +418,7 @@ export async function benchRender(
     const drawn = renderer.stats.drawnSplats;
     return {
       splatCount,
+      backend,
       frameMs: Math.round(frameMs * 100) / 100,
       fps: Math.round((1000 / Math.max(frameMs, 0.01)) * 10) / 10,
       drawnSplats: drawn,
@@ -425,3 +428,4 @@ export async function benchRender(
     renderer.dispose();
   }
 }
+

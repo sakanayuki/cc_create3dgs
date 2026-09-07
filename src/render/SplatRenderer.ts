@@ -37,6 +37,13 @@ export interface SplatRenderer {
   /** 深度レンジ。ソートのバケット割り当てに使う。 */
   setDepthRange(nearZ: number, farZ: number): void;
   render(): void;
+  /**
+   * 直前の render() の GPU 側の完了を待つ。
+   *
+   * ベンチで正確な時間を測るために要る。通常の描画ループでは呼ばない
+   * （待つとパイプラインが止まって遅くなる）。待ち方はバックエンドで違う。
+   */
+  flush(): Promise<void>;
   resize(width: number, height: number): void;
   dispose(): void;
   readonly stats: RenderStats;

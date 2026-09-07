@@ -312,6 +312,11 @@ export class WgslSplatRenderer implements SplatRenderer {
     this.stats.frameMs = performance.now() - t0;
   }
 
+  /** 投入済みの作業が終わるまで待つ。WebGPU はこれが最も実測に近い。 */
+  async flush(): Promise<void> {
+    await this.device.queue.onSubmittedWorkDone();
+  }
+
   dispose(): void {
     this.splatBuf?.destroy();
     this.sortedBuf?.destroy();

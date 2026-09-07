@@ -381,6 +381,35 @@ export class Webgl2SplatRenderer implements SplatRenderer {
     this.stats.frameMs = performance.now() - t0;
   }
 
+  /**
+   * 描画の完了を待つ。
+   *
+   * `gl.finish()` はブロックするので、fence sync を使ってポーリングする。
+   * fence が使えない場合だけ finish() に落とす。
+   */
+  async flush(): Promise<void> {
+    const gl = this.gl;
+    const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+    if (!sync) {
+      gl.finish();
+      return;
+    }
+    gl.flush();
+    try {
+      for (;;) {
+        const status = gl.clientWaitSync(sync, 0, 0);
+        if (status === gl.ALREADY_SIGNALED || status === gl.CONDITION_SATISFIED) return;
+        if (status === gl.WAIT_FAILED) {
+          gl.finish();
+          return;
+        }
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      }
+    } finally {
+      gl.deleteSync(sync);
+    }
+  }
+
   dispose(): void {
     const gl = this.gl;
     if (this.vao) gl.deleteVertexArray(this.vao);
