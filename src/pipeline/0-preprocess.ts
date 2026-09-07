@@ -132,34 +132,81 @@ export function subjectBBox(
 }
 
 /**
- * 被写体の外接矩形を 2×2 に分けたタイルを返す（docs/03 §3.4「2パス構成」）。
+ * 被写体の外接矩形を覆う**正方形**タイルを、長辺に沿って並べて返す
+ * （docs/03 §3.4「2パス構成」）。
  *
  * 隣り合うタイルは `overlap` の割合だけ重ねる。重なり領域が無いと、
  * 全体パスとの整合（最小二乗フィット）もタイル同士の融合もできない。
  *
  * 返す矩形は必ず画像の内側に収まる。はみ出したまま推論に渡すと、
  * 端が黒で埋まってそこに偽の深度段差ができる。
+ *
+ * **正方形であること・長辺に沿って並べることが要**（v2.3、実写で判明）。
+ * 以前は外接矩形を一律 2×2 に割っていたが、立っている人物では
+ *
+ *   - タイルが縦長（実測 330×550）になり、518² へ引き伸ばすと**顔が横に
+ *     1.67 倍伸びる**。歪んだ顔から返る深度は使えない。
+ *   - 縦の継ぎ目が外接矩形の左右中央、つまり**顔のまん中**に来る。実測では
+ *     重なり帯が顔幅の 62% を横断し、顔の 21% がタイルの外へ出ていた。
+ *     左右のタイルが別々に尺度を合わせるので、顔の中央に段差が入る。
+ *
+ * 立った人物の外接矩形は縦長で、横はもともと 518 に近い。横に割っても
+ * 解像度は得られず、顔を切る害だけが残る。長辺（＝縦）にだけ並べる。
  */
 export function depthTiles(bbox: Rect, imageWidth: number, imageHeight: number, overlap = 0.2): Rect[] {
-  const tw = Math.min(imageWidth, Math.ceil((bbox.width * (1 + overlap)) / 2));
-  const th = Math.min(imageHeight, Math.ceil((bbox.height * (1 + overlap)) / 2));
+  const longSide = Math.max(bbox.width, bbox.height);
+  const shortSide = Math.min(bbox.width, bbox.height);
+
+  // 短辺は 1 枚で覆いきる。割ると被写体を縦に切ってしまう。
+  // 長辺は 2 枚に分ける目安で、短辺のほうが大きければそちらに合わせる。
+  const side = Math.max(
+    1,
+    Math.min(imageWidth, imageHeight, Math.max(shortSide, Math.ceil(longSide / 2))),
+  );
+
+  // 1 枚では覆えない残り。これが僅かなら割らない。ほとんど同じタイルを
+  // 2 枚推論しても解像度は上がらず、融合の継ぎ目を増やすだけ損になる。
+  const remainder = longSide - side;
+  const step = Math.max(1, Math.round(side * (1 - overlap)));
+  const count = remainder > side * 0.1 ? Math.ceil(remainder / step) + 1 : 1;
+  const alongX = bbox.width >= bbox.height;
+
   const tiles: Rect[] = [];
-  for (const [fx, fy] of [
-    [0, 0],
-    [1, 0],
-    [0, 1],
-    [1, 1],
-  ] as const) {
-    // 右下タイルは外接矩形の右下端に揃える。左上から等間隔に置くと
-    // 端数のぶんだけ被写体の右下がどのタイルにも入らないことがある。
-    const x = fx === 0 ? bbox.x : bbox.x + bbox.width - tw;
-    const y = fy === 0 ? bbox.y : bbox.y + bbox.height - th;
-    tiles.push({
-      x: Math.max(0, Math.min(imageWidth - tw, x)),
-      y: Math.max(0, Math.min(imageHeight - th, y)),
-      width: tw,
-      height: th,
-    });
+  const seen = new Set<string>();
+  for (let i = 0; i < count; i++) {
+    // 端をぴったり合わせて等間隔に置く。端数で被写体の端が欠けるのを防ぐ。
+    const offset = count === 1 ? 0 : Math.round((i * (longSide - side)) / (count - 1));
+    const rawX = alongX ? bbox.x + offset : bbox.x + Math.round((bbox.width - side) / 2);
+    const rawY = alongX ? bbox.y + Math.round((bbox.height - side) / 2) : bbox.y + offset;
+    const x = Math.max(0, Math.min(imageWidth - side, rawX));
+    const y = Math.max(0, Math.min(imageHeight - side, rawY));
+    const key = `${x},${y}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    tiles.push({ x, y, width: side, height: side });
   }
   return tiles;
+}
+
+/**
+ * 矩形を、画像の内側に収まる正方形へ広げる。
+ *
+ * 深度モデルは正方の入力を取る。正方でない領域を 518² へ引き伸ばすと
+ * 縦横で倍率が変わり、被写体（とくに顔）が歪む。黒でパディングする手も
+ * あるが、縁に偽の深度段差ができるので、実際の画素で埋められるほうを採る。
+ *
+ * 画像そのものが正方形でなく、短辺より大きな正方形が取れない場合は、
+ * 取れるだけの正方形（＝短辺）を返す。
+ */
+export function expandToSquare(rect: Rect, imageWidth: number, imageHeight: number): Rect {
+  const side = Math.min(
+    Math.max(rect.width, rect.height),
+    imageWidth,
+    imageHeight,
+  );
+  const cx = rect.x + rect.width / 2;
+  const cy = rect.y + rect.height / 2;
+  const x = Math.round(Math.max(0, Math.min(imageWidth - side, cx - side / 2)));
+  const y = Math.round(Math.max(0, Math.min(imageHeight - side, cy - side / 2)));
+  return { x, y, width: side, height: side };
 }

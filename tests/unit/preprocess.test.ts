@@ -3,7 +3,13 @@
  * 画像デコードはブラウザ API に任せているので、ここでは座標の計算だけを見る。
  */
 import { describe, expect, it } from 'vitest';
-import { depthTiles, gridToSource, letterbox, subjectBBox } from '../../src/pipeline/0-preprocess';
+import {
+  depthTiles,
+  expandToSquare,
+  gridToSource,
+  letterbox,
+  subjectBBox,
+} from '../../src/pipeline/0-preprocess';
 
 describe('レターボックス', () => {
   it('横長の写真を中央に置き、上下に余白を作る', () => {
@@ -69,35 +75,112 @@ describe('被写体の外接矩形', () => {
 });
 
 describe('深度タイル', () => {
-  it('4枚で外接矩形を覆い、隣と重なる', () => {
-    const bbox = { x: 100, y: 100, width: 400, height: 400 };
+  it('タイルは必ず正方形（518² へ歪みなく渡せる）', () => {
+    // 立った人物のような縦長の外接矩形でも、正方でなければならない。
+    // 縦長のまま 518² へ伸ばすと顔が横に伸びる（実測 1.67 倍）。
+    for (const bbox of [
+      { x: 201, y: 108, width: 550, height: 916 }, // 実写の全身
+      { x: 100, y: 100, width: 400, height: 400 }, // 正方
+      { x: 0, y: 300, width: 900, height: 300 },   // 横長
+    ]) {
+      for (const t of depthTiles(bbox, 1024, 1024, 0.2)) {
+        expect(t.width).toBe(t.height);
+      }
+    }
+  });
+
+  it('縦長の被写体では横に割らない（顔を継ぎ目が横切らない）', () => {
+    // 実写で顔が割れた条件。外接矩形の左右中央に継ぎ目が来ると、
+    // 左右のタイルが別々に尺度を合わせるので顔の中央に段差が入る。
+    const bbox = { x: 201, y: 108, width: 550, height: 916 };
     const tiles = depthTiles(bbox, 1024, 1024, 0.2);
-    expect(tiles).toHaveLength(4);
-
-    // 各タイルは 400 × 1.2 / 2 = 240
     for (const t of tiles) {
-      expect(t.width).toBe(240);
-      expect(t.height).toBe(240);
+      // どのタイルも外接矩形の横幅を丸ごと覆う
+      expect(t.x).toBeLessThanOrEqual(bbox.x);
+      expect(t.x + t.width).toBeGreaterThanOrEqual(bbox.x + bbox.width);
     }
-    // 左上と右上は横に重なる
-    const [tl, tr] = tiles as [typeof tiles[0], typeof tiles[0]];
-    expect(tl.x + tl.width).toBeGreaterThan(tr.x);
+  });
 
-    // 4枚の和が外接矩形を覆う
-    const covered = new Set<string>();
-    for (const t of tiles) {
-      for (let y = t.y; y < t.y + t.height; y += 1) covered.add(`${y}`);
+  it('頭部が丸ごと 1 枚のタイルに収まる', () => {
+    // 実写で測った頭部の位置。ここが 2 枚にまたがると顔が割れる。
+    const bbox = { x: 201, y: 108, width: 550, height: 916 };
+    const head = { x0: 401, y0: 152, x1: 579, y1: 440 };
+    const tiles = depthTiles(bbox, 1024, 1024, 0.2);
+    const holds = tiles.some(
+      (t) => t.x <= head.x0 && t.x + t.width >= head.x1 && t.y <= head.y0 && t.y + t.height >= head.y1,
+    );
+    expect(holds).toBe(true);
+  });
+
+  it('長辺を覆い、隣と重なる', () => {
+    const bbox = { x: 201, y: 108, width: 550, height: 916 };
+    const tiles = depthTiles(bbox, 1024, 1024, 0.2);
+    expect(tiles.length).toBeGreaterThanOrEqual(2);
+
+    const sorted = [...tiles].sort((a, b) => a.y - b.y);
+    // 先頭は矩形の上端、末尾は下端に届く
+    expect(sorted[0]!.y).toBeLessThanOrEqual(bbox.y);
+    expect(sorted[sorted.length - 1]!.y + sorted[sorted.length - 1]!.height).toBeGreaterThanOrEqual(
+      bbox.y + bbox.height,
+    );
+    // 隣り合うタイルは重なる（融合には重なりが要る）
+    for (let i = 1; i < sorted.length; i++) {
+      expect(sorted[i - 1]!.y + sorted[i - 1]!.height).toBeGreaterThan(sorted[i]!.y);
     }
-    for (let y = bbox.y; y < bbox.y + bbox.height; y++) expect(covered.has(`${y}`)).toBe(true);
+  });
+
+  it('外接矩形が正方に近ければ 1 枚で済ませる', () => {
+    // バストアップの構図。割る理由が無い。
+    const tiles = depthTiles({ x: 200, y: 150, width: 600, height: 620 }, 1024, 1024, 0.2);
+    expect(tiles).toHaveLength(1);
+    expect(tiles[0]!.width).toBe(tiles[0]!.height);
   });
 
   it('画像の外へはみ出さない', () => {
-    const bbox = { x: 0, y: 0, width: 1024, height: 1024 };
-    for (const t of depthTiles(bbox, 1024, 1024, 0.2)) {
-      expect(t.x).toBeGreaterThanOrEqual(0);
-      expect(t.y).toBeGreaterThanOrEqual(0);
-      expect(t.x + t.width).toBeLessThanOrEqual(1024);
-      expect(t.y + t.height).toBeLessThanOrEqual(1024);
+    for (const bbox of [
+      { x: 0, y: 0, width: 1024, height: 1024 },
+      { x: 900, y: 900, width: 124, height: 124 },
+      { x: 201, y: 108, width: 550, height: 916 },
+    ]) {
+      for (const t of depthTiles(bbox, 1024, 1024, 0.2)) {
+        expect(t.x).toBeGreaterThanOrEqual(0);
+        expect(t.y).toBeGreaterThanOrEqual(0);
+        expect(t.x + t.width).toBeLessThanOrEqual(1024);
+        expect(t.y + t.height).toBeLessThanOrEqual(1024);
+      }
     }
+  });
+});
+
+describe('正方への拡張', () => {
+  it('縦長の矩形を、元を含む正方形に広げる', () => {
+    const r = expandToSquare({ x: 201, y: 108, width: 330, height: 550 }, 1024, 1024);
+    expect(r.width).toBe(r.height);
+    expect(r.width).toBe(550);
+    expect(r.x).toBeLessThanOrEqual(201);
+    expect(r.x + r.width).toBeGreaterThanOrEqual(201 + 330);
+    expect(r.y).toBeLessThanOrEqual(108);
+    expect(r.y + r.height).toBeGreaterThanOrEqual(108 + 550);
+  });
+
+  it('画像の端でも外へはみ出さない', () => {
+    for (const r0 of [
+      { x: 0, y: 0, width: 100, height: 400 },
+      { x: 924, y: 700, width: 100, height: 324 },
+    ]) {
+      const r = expandToSquare(r0, 1024, 1024);
+      expect(r.x).toBeGreaterThanOrEqual(0);
+      expect(r.y).toBeGreaterThanOrEqual(0);
+      expect(r.x + r.width).toBeLessThanOrEqual(1024);
+      expect(r.y + r.height).toBeLessThanOrEqual(1024);
+      // 元の矩形を含んでいる
+      expect(r.x).toBeLessThanOrEqual(r0.x);
+      expect(r.y).toBeLessThanOrEqual(r0.y);
+    }
+  });
+
+  it('すでに正方形ならそのまま', () => {
+    const r = expandToSquare({ x: 10, y: 20, width: 300, height: 300 }, 1024, 1024);
+    expect(r).toEqual({ x: 10, y: 20, width: 300, height: 300 });
   });
 });

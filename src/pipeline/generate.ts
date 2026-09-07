@@ -16,6 +16,7 @@ import { adaptiveSample, solveSamplingParams, samplingReduction } from './7-samp
 import { refineMatte } from './1-matte';
 import {
   depthTiles,
+  expandToSquare,
   prepareImage,
   subjectBBox,
   WORKING_GRID,
@@ -270,18 +271,40 @@ async function inferDepthPatch(
   session: ort.InferenceSession,
   rgba: ArrayLike<number>,
   srcWidth: number,
+  srcHeight: number,
   rect: Rect,
 ): Promise<Float32Array> {
   const size = 518;
-  const patch = cropRgba(rgba, srcWidth, rect.x, rect.y, rect.width, rect.height);
-  const small = resizeRgba(patch, rect.width, rect.height, size, size);
+  // 正方でない領域をそのまま 518² へ伸ばすと、被写体が縦横で違う倍率に
+  // なる。実写では縦長タイル（330×550）で顔が横に 1.67 倍伸び、そこから
+  // 返る深度が使い物にならなかった。まず画像の内側で正方に広げて推論し、
+  // 返ってきた深度から元の領域を切り出す。黒でパディングしないのは、
+  // 縁に偽の深度段差ができるため。
+  const square = expandToSquare(rect, srcWidth, srcHeight);
+  const patch = cropRgba(rgba, srcWidth, square.x, square.y, square.width, square.height);
+  const small = resizeRgba(patch, square.width, square.height, size, size);
   const input = toTensorNCHW(small, size, size, { mean: IMAGENET_MEAN, std: IMAGENET_STD });
   const dims = inputDims(declaredRank(session), 3, size, size);
   const out = await session.run(feedOf(session, new ort.Tensor('float32', input, dims)));
   const raw = pickOutput(out, session, 'predicted_depth', 'depth', 'output').data as unknown as
     Float32Array;
   const side = Math.round(Math.sqrt(raw.length));
-  return resizePlane(raw, side, side, rect.width, rect.height);
+  const full = resizePlane(raw, side, side, square.width, square.height);
+  if (square.width === rect.width && square.height === rect.height) return full;
+
+  // 画像が細長くて正方形が短辺で頭打ちになると、rect が square に収まり
+  // きらないことがある。そのときは端の値で埋める（読み出しははみ出さない）。
+  const cut = new Float32Array(rect.width * rect.height);
+  const dx = rect.x - square.x;
+  const dy = rect.y - square.y;
+  for (let y = 0; y < rect.height; y++) {
+    const sy = Math.max(0, Math.min(square.height - 1, y + dy));
+    for (let x = 0; x < rect.width; x++) {
+      const sx = Math.max(0, Math.min(square.width - 1, x + dx));
+      cut[y * rect.width + x] = full[sy * square.width + sx] as number;
+    }
+  }
+  return cut;
 }
 
 async function runDepth(
@@ -363,7 +386,7 @@ async function runDepthTiles(
   for (const rect of rects) {
     if (rect.width < 32 || rect.height < 32) continue;
     try {
-      tiles.push({ depth: await inferDepthPatch(session, rgba, grid, rect), rect });
+      tiles.push({ depth: await inferDepthPatch(session, rgba, grid, grid, rect), rect });
     } catch {
       // 1枚失敗しても全体パスは使える。落とさずに続ける。
     }
