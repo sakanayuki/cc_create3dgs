@@ -348,16 +348,42 @@ function verdicts(): Record<string, string> {
       (hasIntrinsics ? '内部パラメータの出力がある可能性が高い' : '深度のみ。焦点距離は EXIF → 画角55°仮定へ');
   }
 
+  // D11（マルチスレッド化）の判定。
+  //
+  // 「何倍速いか」ではなく **SLO に届くかどうか** で判断する。
+  // 倍率に閾値を置くのは恣意的で、実際に誤解を招く判定を出した。
+  // 人物・軽量プリセットの内訳（PoC-1 実測）:
+  //   マット 4.1s + 深度 11.6s + 幾何 2.0s（幾何は JS なのでスレッド化の対象外）
+  const MATTE_S = 4.1;
+  const DEPTH_S = 11.6;
+  const GEOMETRY_S = 2.0; // ORT のスレッドでは速くならない
+  const LIGHT_SLO_S = 10.0;
+
   const ok = state.threads.filter((t) => t.ok && t.inferMs);
   const one = ok.find((t) => t.numThreads === 1)?.inferMs;
   const best = ok.length ? ok.reduce((a, b) => ((b.inferMs ?? 0) < (a.inferMs ?? Infinity) ? b : a)) : null;
+
   if (!one || !best?.inferMs || ok.length < 2) {
     v['D11'] = isolationSummary().crossOriginIsolated ? '未検証' : '未検証（マルチスレッド未有効）';
   } else {
     const gain = one / best.inferMs;
-    v['D11'] = gain >= 2
-      ? `導入する価値あり — ${best.numThreads} スレッドで ${gain.toFixed(2)}× 速い（${one} → ${best.inferMs} ms）`
-      : `効果が小さい — 最良でも ${gain.toFixed(2)}×。Service Worker のコストに見合わない可能性`;
+    const single = MATTE_S + DEPTH_S + GEOMETRY_S;
+    const multi = (MATTE_S + DEPTH_S) / gain + GEOMETRY_S;
+    const fmt = (n: number) => `${n.toFixed(1)}s`;
+    const detail =
+      `${best.numThreads} スレッドで ${gain.toFixed(2)}×（${one} → ${best.inferMs} ms）。` +
+      `人物・軽量プリセットの見込み: 単スレッド ${fmt(single)} → ${fmt(multi)}`;
+
+    if (multi <= LIGHT_SLO_S) {
+      v['D11'] = `導入する — これで軽量プリセットが SLO ${LIGHT_SLO_S}秒に収まる。${detail}`;
+    } else if (single > LIGHT_SLO_S) {
+      // 単スレッドでは論外なので、届かなくても導入は必要。足りない分は別の手当てが要る。
+      v['D11'] =
+        `導入は必要だが、それだけでは足りない — SLO ${LIGHT_SLO_S}秒に対し ${fmt(multi)}。` +
+        `入力解像度を下げるなど別のレバーが要る。${detail}`;
+    } else {
+      v['D11'] = `導入しなくても SLO に収まる — Service Worker のコストに見合わない。${detail}`;
+    }
   }
 
   const std = state.render.find((r) => r.splatCount === 424_000);
