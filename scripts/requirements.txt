@@ -1,4 +1,7 @@
 onnx==1.17.0
+# fp16 変換に使う（scripts/quantize.py の to_fp16）。onnx 本体には入っていない。
+# これが無いと q4f16 の生成が ModuleNotFoundError で落ちる（deploy #14 で発生）。
+onnxconverter-common>=1.14
 onnxruntime==1.22.0
 numpy>=1.26,<3
 Pillow>=10.4

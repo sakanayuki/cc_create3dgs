@@ -21,9 +21,17 @@
   },
 
   "models": {
+    "_comment": [
+      "firstVisit / objectMode は「1台の端末が実際に落とす量」。D22 でモデルは",
+      "バックエンドぶん置かれるので、manifest.json の byBackend を見て",
+      "バックエンドごとに数え、重いほうで判定する（scripts/budget_check.mjs）。",
+      "total は配信側に置くファイルの合計で、利用者が待つ量ではない。",
+      "深度モデルだけが2方式（q4f16 22MB + uint8 27MB）になるぶん、",
+      "v2.2 で 85MB → 120MB に引き上げた。1台あたりの量は増えていない。"
+    ],
     "firstVisit.person": { "warn": 36600000, "fail": 42000000 },
     "objectMode.extra":  { "warn": 44100000, "fail": 50000000 },
-    "total":             { "warn": 85000000, "fail": 100000000 }
+    "total":             { "warn": 120000000, "fail": 140000000 }
   },
 
   "pages": {

@@ -56,10 +56,55 @@ const modelBytes = Object.fromEntries(
 const pick = (re) =>
   Object.entries(modelBytes).filter(([k]) => re.test(k)).reduce((a, [, v]) => a + v, 0);
 
+/**
+ * 端末が実際に落とす量を、バックエンドごとに数える。
+ *
+ * D22 でモデルはバックエンドぶん置かれるようになった（深度モデルなら
+ * WebGPU 用 q4f16 と WASM 用 uint8 の2つ）。サーバ上のファイルを単純に
+ * 足すと、1台の端末が落とす量の2倍近くになってしまう。バジェットが
+ * 見たいのは「利用者が待つ量」なので、マニフェストの byBackend を見て
+ * バックエンドごとに数え、**重いほう**で判定する。
+ *
+ * マニフェストが無い場合（モデル未焼き込み）は、従来どおりファイル名で拾う。
+ */
+const manifestPath = join(DIST, 'models', 'manifest.json');
+const manifest = existsSync(manifestPath) ? JSON.parse(readFileSync(manifestPath, 'utf8')) : null;
+
+const bytesOfFile = (file) => modelBytes[file.replace(/\.onnx$/, '')] ?? 0;
+
+/** マニフェストから、そのバックエンドで id 群が要する実バイト数。 */
+const backendBytes = (backend, ids) => {
+  if (!manifest) return null;
+  const seen = new Map();
+  for (const id of ids) {
+    const entry = manifest.models?.find((m) => m.id === id);
+    const file = entry?.byBackend?.[backend] ?? entry?.file;
+    if (file) seen.set(file, bytesOfFile(file));
+  }
+  return [...seen.values()].reduce((a, v) => a + v, 0);
+};
+
+const backends = manifest?.backends ?? ['webgpu', 'wasm'];
+const personIds = ['depth-anything-v3-small', 'modnet', 'mi-gan'];
+const objectIds = ['isnet-general'];
+
 const depth = pick(/^depth-anything-v3-small\./) || pick(/^depth-anything-v2-small\./);
 const person = pick(/^modnet\./);
 const inpaint = pick(/^mi-gan\./);
-const objectExtra = pick(/^isnet-general\.|^rmbg/);
+
+// 初回必須は、バックエンドごとに数えて重いほうを採る。
+const firstVisitPerBackend = manifest
+  ? backends.map((b) => ({ backend: b, bytes: backendBytes(b, personIds) ?? 0 }))
+  : [];
+const firstVisit = firstVisitPerBackend.length
+  ? Math.max(...firstVisitPerBackend.map((x) => x.bytes))
+  : depth + person + inpaint;
+
+const objectExtra = manifest
+  ? Math.max(...backends.map((b) => backendBytes(b, objectIds) ?? 0))
+  : pick(/^isnet-general\.|^rmbg/);
+
+// サーバ側の総量。1台が落とす量ではないので、別の指標として持つ。
 const modelTotal = Object.values(modelBytes).reduce((a, v) => a + v, 0);
 const pagesTotal = files.reduce((a, f) => a + f.bytes, 0);
 
@@ -99,9 +144,9 @@ const add = (label, value, fmt, rule) => {
 add('JS バンドル (gzip)', jsGzip, kb, budget.bundle?.['js.gzip']);
 add('CSS バンドル (gzip)', cssGzip, kb, budget.bundle?.['css.gzip']);
 add('ORT wasm jsep (gzip)', ortWasmGzip, mb, budget.runtime?.['ort.wasm.gzip']);
-add('初回必須モデル (人物)', depth + person + inpaint, mb, budget.models?.['firstVisit.person']);
+add('初回必須モデル (人物)', firstVisit, mb, budget.models?.['firstVisit.person']);
 add('物体モード追加分', objectExtra, mb, budget.models?.['objectMode.extra']);
-add('モデル合計', modelTotal, mb, budget.models?.total);
+add('モデル合計 (配信側)', modelTotal, mb, budget.models?.total);
 add('Pages 全体 (非圧縮)', pagesTotal, mb, budget.pages?.totalUncompressed);
 
 if (metrics) {
