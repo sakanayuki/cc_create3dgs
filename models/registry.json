@@ -1,26 +1,31 @@
 {
   "$schema": "./registry.schema.json",
   "version": 2,
-
   "_comment": [
     "モデルの単一の真実。CI（scripts/fetch_models.py, quantize.py）とブラウザの双方が読む。",
     "ライセンス方針が未定（決定 D6）なので、プロファイルの切り替えだけでモデル群を差し替えられる。",
     "既定は permissive（MIT / Apache-2.0 のみ）。"
   ],
-
   "defaultProfile": "permissive",
-
   "_backendQuantization": [
     "PoC-1（2026-09-07, Android 10 実機）で判明: WASM では q4f16 が最遅（19.8s）、",
     "uint8 が最速（12.9s）。MatMulNBits に WASM の速い経路が無いため。",
-    "したがって量子化方式はバックエンドで変える（決定 D19）。",
-    "CI は両方を生成し、ブラウザが実行プロバイダに応じて選ぶ。"
+    "したがって量子化方式はバックエンドで変える（決定 D22）。",
+    "CI は backendQuantization の各バックエンドぶんを生成し、",
+    "ブラウザは models/manifest.json を読んで実行プロバイダに合うものを選ぶ。",
+    "モデルごとに quantization.byBackend で上書きできる。",
+    "省略時の既定はここの defaults に従う。"
   ],
   "backendQuantization": {
-    "webgpu": "q4f16",
-    "wasm": "uint8"
+    "backends": [
+      "webgpu",
+      "wasm"
+    ],
+    "defaults": {
+      "webgpu": "q4f16",
+      "wasm": "uint8"
+    }
   },
-
   "profiles": {
     "permissive": {
       "_comment": "商用利用に制約のないモデルのみ。",
@@ -39,7 +44,6 @@
       "inpaint": "mi-gan"
     }
   },
-
   "models": {
     "depth-anything-v3-small": {
       "role": "depth",
@@ -47,26 +51,44 @@
       "hf": {
         "repo": "onnx-community/depth-anything-v3-small",
         "file": "onnx/model.onnx",
-        "extraFiles": ["onnx/model.onnx_data"]
+        "extraFiles": [
+          "onnx/model.onnx_data"
+        ]
       },
       "upstream": "depth-anything/DA3-SMALL",
       "license": "Apache-2.0",
       "commercialUse": true,
-      "inputSize": [518, 518],
+      "inputSize": [
+        518,
+        518
+      ],
       "outputKind": "metric-ish-depth",
-      "outputs": ["predicted_depth", "confidence", "extrinsics", "intrinsics"],
+      "outputs": [
+        "predicted_depth",
+        "confidence",
+        "extrinsics",
+        "intrinsics"
+      ],
       "quantization": {
         "mode": "q4f16",
         "perChannel": true,
         "calibrationMethod": "Entropy",
-        "excludeOpTypes": ["LayerNormalization", "Softmax", "Sigmoid"],
+        "excludeOpTypes": [
+          "LayerNormalization",
+          "Softmax",
+          "Sigmoid"
+        ],
         "keepHeadFp16": true
       },
       "quantizationWasm": {
         "mode": "uint8",
         "perChannel": true,
         "calibrationMethod": "Entropy",
-        "excludeOpTypes": ["LayerNormalization", "Softmax", "Sigmoid"]
+        "excludeOpTypes": [
+          "LayerNormalization",
+          "Softmax",
+          "Sigmoid"
+        ]
       },
       "expectedBytes": 22000000,
       "sizeTolerance": 0.35,
@@ -79,7 +101,6 @@
         "WASM 単スレッドでの実測は fp32 で 13.3s（DA2-S の fp16 19.6s より速い）。"
       ]
     },
-
     "depth-anything-v2-small": {
       "role": "depth",
       "title": "Depth Anything V2 Small",
@@ -95,13 +116,20 @@
       "upstream": "depth-anything/Depth-Anything-V2-Small",
       "license": "Apache-2.0",
       "commercialUse": true,
-      "inputSize": [518, 518],
+      "inputSize": [
+        518,
+        518
+      ],
       "outputKind": "affine-invariant-inverse-depth",
       "quantization": {
         "mode": "q4f16",
         "perChannel": true,
         "calibrationMethod": "Entropy",
-        "excludeOpTypes": ["LayerNormalization", "Softmax", "Sigmoid"],
+        "excludeOpTypes": [
+          "LayerNormalization",
+          "Softmax",
+          "Sigmoid"
+        ],
         "keepHeadFp16": true
       },
       "expectedBytes": 19100000,
@@ -112,71 +140,139 @@
         "V2 の Base / Large は CC-BY-NC のため使用しない。"
       ]
     },
-
     "modnet": {
       "role": "matte",
       "subject": "person",
       "title": "MODNet",
-      "hf": { "repo": "Xenova/modnet", "file": "onnx/model.onnx" },
-      "prequantized": { "uint8": "onnx/model_uint8.onnx", "fp16": "onnx/model_fp16.onnx" },
+      "hf": {
+        "repo": "Xenova/modnet",
+        "file": "onnx/model.onnx"
+      },
+      "prequantized": {
+        "uint8": "onnx/model_uint8.onnx",
+        "fp16": "onnx/model_fp16.onnx"
+      },
       "license": "Apache-2.0",
       "commercialUse": true,
-      "inputSize": [512, 512],
-      "quantization": { "mode": "uint8", "perChannel": true, "calibrationMethod": "Entropy" },
+      "inputSize": [
+        512,
+        512
+      ],
+      "quantization": {
+        "mode": "uint8",
+        "perChannel": true,
+        "calibrationMethod": "Entropy",
+        "byBackend": {
+          "webgpu": "uint8",
+          "wasm": "uint8"
+        }
+      },
       "expectedBytes": 6600000,
       "sizeTolerance": 0.2,
-      "notes": ["人物特化で軽く速い（約0.35s）。髪の抜けは弱いので高品質プリセットでは ISNet に切り替える。"]
+      "notes": [
+        "人物特化で軽く速い（約0.35s）。髪の抜けは弱いので高品質プリセットでは ISNet に切り替える。",
+        "畳み込み中心なので q4f16 の恩恵が無い。両バックエンドとも uint8（決定 D22）。"
+      ]
     },
-
     "isnet-general": {
       "role": "matte",
       "subject": "object",
       "title": "ISNet General (img.ly)",
-      "hf": { "repo": "imgly/isnet-general-onnx", "file": "onnx/model.onnx" },
+      "hf": {
+        "repo": "imgly/isnet-general-onnx",
+        "file": "onnx/model.onnx"
+      },
       "license": "MIT",
       "commercialUse": true,
-      "inputSize": [1024, 1024],
-      "quantization": { "mode": "uint8", "perChannel": true, "calibrationMethod": "Entropy" },
+      "inputSize": [
+        1024,
+        1024
+      ],
+      "quantization": {
+        "mode": "uint8",
+        "perChannel": true,
+        "calibrationMethod": "Entropy",
+        "byBackend": {
+          "webgpu": "uint8",
+          "wasm": "uint8"
+        }
+      },
       "expectedBytes": 44100000,
       "sizeTolerance": 0.25,
-      "inputSizeWasm": [512, 512],
+      "inputSizeWasm": [
+        512,
+        512
+      ],
       "notes": [
         "量子化版が未公開なので CI で自前生成する。物体全般＋高品質プリセットの人物マット。",
         "PoC-1 実測: WASM 単スレッドで 1024² は 37.8s と使えない。",
-        "WASM 経路では 512² に落とす（inputSizeWasm）。"
+        "WASM 経路では 512² に落とす（inputSizeWasm）。",
+        "畳み込み中心なので q4f16 の恩恵が無い。両バックエンドとも uint8（決定 D22）。"
       ]
     },
-
     "rmbg-1.4": {
       "role": "matte",
       "subject": "object",
       "title": "RMBG-1.4 (BRIA)",
-      "hf": { "repo": "briaai/RMBG-1.4", "file": "onnx/model.onnx" },
-      "prequantized": { "uint8": "onnx/model_quantized.onnx" },
+      "hf": {
+        "repo": "briaai/RMBG-1.4",
+        "file": "onnx/model.onnx"
+      },
+      "prequantized": {
+        "uint8": "onnx/model_quantized.onnx"
+      },
       "license": "bria-rmbg-1.4 (非商用)",
       "commercialUse": false,
-      "inputSize": [1024, 1024],
-      "quantization": { "mode": "uint8", "perChannel": true, "calibrationMethod": "Entropy" },
+      "inputSize": [
+        1024,
+        1024
+      ],
+      "quantization": {
+        "mode": "uint8",
+        "perChannel": true,
+        "calibrationMethod": "Entropy",
+        "byBackend": {
+          "webgpu": "uint8",
+          "wasm": "uint8"
+        }
+      },
       "expectedBytes": 44400000,
       "sizeTolerance": 0.2,
-      "notes": ["research プロファイル専用。商用不可。"]
+      "notes": [
+        "research プロファイル専用。商用不可。",
+        "畳み込み中心なので q4f16 の恩恵が無い。両バックエンドとも uint8（決定 D22）。"
+      ]
     },
-
     "mi-gan": {
       "role": "inpaint",
       "title": "MI-GAN (Picsart)",
-      "hf": { "repo": "andraniksargsyan/migan", "file": "migan_pipeline_v2.onnx" },
+      "hf": {
+        "repo": "andraniksargsyan/migan",
+        "file": "migan_pipeline_v2.onnx"
+      },
       "upstream": "https://github.com/Picsart-AI-Research/MI-GAN",
       "license": "MIT",
       "commercialUse": true,
-      "inputSize": [512, 512],
-      "quantization": { "mode": "uint8", "perChannel": true, "calibrationMethod": "MinMax" },
+      "inputSize": [
+        512,
+        512
+      ],
+      "quantization": {
+        "mode": "uint8",
+        "perChannel": true,
+        "calibrationMethod": "MinMax",
+        "byBackend": {
+          "webgpu": "uint8",
+          "wasm": "uint8"
+        }
+      },
       "expectedBytes": 8000000,
       "sizeTolerance": 0.4,
       "notes": [
         "遮蔽部インペイント（決定 D16）。モバイル向けに設計されたモデル。",
         "Places2 + FFHQ で学習。物体の規則的な模様は不得手（リスク R11）。",
-        "GAN は量子化で崩れやすいので calibrationMethod は MinMax。PoC-1 で PSNR を確認する。"
+        "GAN は量子化で崩れやすいので calibrationMethod は MinMax。PoC-1 で PSNR を確認する。",
+        "畳み込み中心なので q4f16 の恩恵が無い。両バックエンドとも uint8（決定 D22）。"
       ]
     }
   }

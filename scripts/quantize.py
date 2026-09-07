@@ -146,13 +146,12 @@ def quantize_fp16(src: Path, dst: Path, cfg: dict[str, Any]) -> None:
 QUANTIZERS = {"q4f16": quantize_q4f16, "uint8": quantize_uint8, "fp16": quantize_fp16}
 
 
-def process_model(m: Model, raw_dir: Path, out_dir: Path, force: bool) -> dict[str, Any]:
-    mode = m.quant_mode
+def build_one(
+    m: Model, mode: str, raw_dir: Path, out_dir: Path, force: bool
+) -> dict[str, Any]:
+    """1つの量子化方式ぶんを作り、その結果を返す。"""
     dst = out_dir / f"{m.id}.{mode}.onnx"
-    entry: dict[str, Any] = {
-        "id": m.id, "role": m.role, "mode": mode, "license": m.license,
-        "commercialUse": m.commercial_use, "inputSize": list(m.input_size),
-    }
+    info: dict[str, Any] = {"mode": mode, "file": dst.name}
 
     # 公開済みの量子化版があれば流用する（CI 時間の節約。registry の prequantized）
     pre_rel = m.prequantized(mode)
@@ -161,27 +160,71 @@ def process_model(m: Model, raw_dir: Path, out_dir: Path, force: bool) -> dict[s
 
     if not force and pre_path is not None and pre_path.exists():
         shutil.copyfile(pre_path, dst)
-        entry["source"] = f"prequantized:{pre_rel}"
+        info["source"] = f"prequantized:{pre_rel}"
+    elif dst.exists() and not force:
+        # 同じ方式を2つのバックエンドが共有する場合、2度作らない。
+        info["source"] = "reused"
     elif src.exists():
         fn = QUANTIZERS.get(mode)
         if fn is None:
             shutil.copyfile(src, dst)
-            entry["source"] = "copied (mode=none)"
+            info["source"] = "copied (mode=none)"
         else:
             print(f"[quantize] {m.id}: {mode} …", flush=True)
             fn(src, dst, m.raw.get("quantization", {}))
-            entry["source"] = "quantized"
+            info["source"] = "quantized"
     else:
-        entry["error"] = f"元モデルが見つかりません: {src}"
-        return entry
+        info["error"] = f"元モデルが見つかりません: {src}"
+        return info
 
     size = dst.stat().st_size
-    entry["bytes"] = size
-    entry["sha256"] = sha256_of(dst)
-    entry["file"] = dst.name
+    info["bytes"] = size
+    info["sha256"] = sha256_of(dst)
+    print(f"[quantize] {m.id}/{mode}: {size/1e6:.1f} MB ({info['source']})", flush=True)
+    return info
+
+
+def process_model(
+    m: Model, raw_dir: Path, out_dir: Path, force: bool, backend_defaults: dict[str, str]
+) -> dict[str, Any]:
+    """バックエンドごとに量子化して、1モデルぶんのマニフェスト項目を返す（決定 D22）。
+
+    同じ方式を2つのバックエンドが指す場合はファイルを1つだけ作り、
+    マニフェストの byBackend が同じファイルを指す。
+    """
+    modes = m.modes_by_backend(backend_defaults) or {"default": m.quant_mode}
+    entry: dict[str, Any] = {
+        "id": m.id, "role": m.role, "license": m.license,
+        "commercialUse": m.commercial_use, "inputSize": list(m.input_size),
+    }
+
+    built: dict[str, dict[str, Any]] = {}
+    by_backend: dict[str, str] = {}
+    for backend, mode in modes.items():
+        if mode not in built:
+            built[mode] = build_one(m, mode, raw_dir, out_dir, force)
+        info = built[mode]
+        if "error" in info:
+            entry["error"] = info["error"]
+            return entry
+        by_backend[backend] = str(info["file"])
+
+    entry["byBackend"] = by_backend
+    entry["variants"] = [
+        {k: v for k, v in info.items() if k != "source"} | {"source": info.get("source", "")}
+        for info in built.values()
+    ]
+    # 互換のため、代表として最初のバックエンドのものを従来の位置にも書く。
+    first = built[next(iter(modes.values()))]
+    entry["mode"] = first["mode"]
+    entry["file"] = first["file"]
+    entry["bytes"] = first.get("bytes", 0)
+    entry["sha256"] = first.get("sha256", "")
+    entry["source"] = first.get("source", "")
 
     expected = m.expected_bytes
-    if expected:
+    size = int(entry["bytes"])
+    if expected and size:
         ratio = abs(size - expected) / expected
         entry["expectedBytes"] = expected
         entry["sizeDeviation"] = round(ratio, 3)
@@ -189,7 +232,6 @@ def process_model(m: Model, raw_dir: Path, out_dir: Path, force: bool) -> dict[s
             entry["warning"] = (
                 f"サイズが想定から {ratio:.0%} 乖離（実 {size/1e6:.1f}MB / 想定 {expected/1e6:.1f}MB）"
             )
-    print(f"[quantize] {m.id}: {size/1e6:.1f} MB ({entry['source']})", flush=True)
     return entry
 
 
@@ -207,13 +249,23 @@ def main() -> int:
     models = list(reg.models.values()) if args.all else reg.models_for_profile(args.profile)
 
     args.out.mkdir(parents=True, exist_ok=True)
-    entries = [process_model(m, args.raw, args.out, args.force) for m in models]
+    backend_defaults = reg.backend_defaults
+    entries = [
+        process_model(m, args.raw, args.out, args.force, backend_defaults) for m in models
+    ]
 
     non_commercial = [e["id"] for e in entries if not e.get("commercialUse", True)]
     manifest = {
         "profile": args.profile or reg.default_profile,
+        "backends": list(backend_defaults.keys()),
         "models": entries,
-        "totalBytes": sum(int(e.get("bytes", 0)) for e in entries),
+        # 総量はファイルの重複を除いて数える。同じ方式を2つのバックエンドが
+        # 共有していると、単純に足すと二重に数えてしまう。
+        "totalBytes": sum(
+            int(v.get("bytes", 0))
+            for e in entries
+            for v in {x["file"]: x for x in e.get("variants", [])}.values()
+        ),
         "warnings": [e["warning"] for e in entries if "warning" in e],
         "nonCommercialModels": non_commercial,
     }

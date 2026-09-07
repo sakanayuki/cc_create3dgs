@@ -16,10 +16,8 @@ import { adaptiveSample, solveSamplingParams, samplingReduction } from './7-samp
 import { refineMatte } from './1-matte';
 import { prepareImage, WORKING_GRID, type Letterbox } from './0-preprocess';
 import { IMAGENET_MEAN, IMAGENET_STD, minMax, resizePlane, resizeRgba, toTensorNCHW } from './imageOps';
-import { createSession, type Backend, type ModelSource } from '../runtime/OrtSession';
-
-const HF = 'https://huggingface.co';
-const hf = (repo: string, path: string): string => `${HF}/${repo}/resolve/main/${path}`;
+import { createSession, type Backend } from '../runtime/OrtSession';
+import { resolveModel, type HfFallback } from '../runtime/modelCatalog';
 
 /** 被写体のモード。docs/03 §3.3。 */
 export type SubjectMode = 'person' | 'object';
@@ -64,28 +62,22 @@ export interface GenerateResult {
   };
 }
 
-/** 同一オリジン → HuggingFace の順に試す。 */
+/**
+ * 同一オリジン（CI が焼いたもの）→ HuggingFace の順に試す。
+ *
+ * どの量子化方式を使うかは `modelCatalog` がバックエンドに応じて選ぶ
+ * （決定 D22）。ここはその結果を順に試すだけ。
+ */
 async function loadModel(
   id: string,
-  repo: string,
-  file: string,
   backend: Backend,
-  quant: string,
-  extra?: string,
+  fallback: HfFallback,
 ): Promise<ort.InferenceSession> {
-  const base = import.meta.env.BASE_URL ?? '/';
-  const candidates: ModelSource[] = [
-    { id, url: `${base}models/${id}.onnx` },
-    {
-      id,
-      url: hf(repo, file),
-      ...(extra ? { externalData: { url: hf(repo, extra), path: extra.split('/').pop() ?? extra } } : {}),
-    },
-  ];
+  const sources = await resolveModel(id, backend, fallback);
   const errors: string[] = [];
-  for (const src of candidates) {
+  for (const src of sources) {
     try {
-      const r = await createSession(src, { backend, quant });
+      const r = await createSession(src, { backend, quant: 'auto' });
       return r.session;
     } catch (e) {
       errors.push(`${src.url}: ${String(e)}`);
@@ -137,8 +129,11 @@ async function runMatte(
   const size = mode === 'person' ? 512 : 1024;
   const session =
     mode === 'person'
-      ? await loadModel('modnet', 'Xenova/modnet', 'onnx/model.onnx', backend, 'fp32')
-      : await loadModel('isnet-general', 'imgly/isnet-general-onnx', 'onnx/model.onnx', backend, 'fp32');
+      ? await loadModel('modnet', backend, { repo: 'Xenova/modnet', file: 'onnx/model_uint8.onnx' })
+      : await loadModel('isnet-general', backend, {
+          repo: 'imgly/isnet-general-onnx',
+          file: 'onnx/model.onnx',
+        });
 
   const small = resizeRgba(rgba, grid, grid, size, size);
   const input = toTensorNCHW(small, size, size, { mean: [0.5, 0.5, 0.5], std: [0.5, 0.5, 0.5] });
@@ -180,14 +175,11 @@ async function runDepth(
   backend: Backend,
 ): Promise<DepthOutput> {
   const size = 518;
-  const session = await loadModel(
-    'depth-anything-v3-small',
-    'onnx-community/depth-anything-v3-small',
-    'onnx/model.onnx',
-    backend,
-    'fp32',
-    'onnx/model.onnx_data',
-  );
+  const session = await loadModel('depth-anything-v3-small', backend, {
+    repo: 'onnx-community/depth-anything-v3-small',
+    file: 'onnx/model.onnx',
+    extra: 'onnx/model.onnx_data',
+  });
 
   const small = resizeRgba(rgba, grid, grid, size, size);
   const input = toTensorNCHW(small, size, size, { mean: IMAGENET_MEAN, std: IMAGENET_STD });
