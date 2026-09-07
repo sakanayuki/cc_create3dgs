@@ -98,8 +98,12 @@ jobs:
           # いれば、その後に落ちる。先に小さなモデルで自己テストして、
           # 壊れているならここで即座に止める。
           python scripts/test_quantize.py
-          python scripts/fetch_models.py  --out build/raw    --profile "$PROFILE"
-          python scripts/quantize.py      --in  build/raw --out build/models --profile "$PROFILE"
+          # --deployed-only: Pages に置くモデルだけを対象にする。
+          # 予備の DA2 は本体アプリが要求しないので置かない（約 49MB の節約）。
+          # 必要になった端末は HuggingFace から取る（modelCatalog の縮退）。
+          python scripts/fetch_models.py  --out build/raw    --profile "$PROFILE" --deployed-only
+          python scripts/quantize.py      --in  build/raw --out build/models --profile "$PROFILE" \
+                                          --deployed-only
           python scripts/calibrate.py     --raw build/raw --models build/models \
                                           --report calibration-report.md --fail-under-threshold
 

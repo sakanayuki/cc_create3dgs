@@ -498,11 +498,17 @@ def main() -> int:
     ap.add_argument("--registry", type=Path, default=None, help="registry.json のパス（差分比較用）")
     ap.add_argument("--profile", default=None)
     ap.add_argument("--all", action="store_true")
+    ap.add_argument("--deployed-only", action="store_true",
+                    help="Pages に置くモデルだけ量子化する（registry の deploy）")
     ap.add_argument("--force", action="store_true", help="prequantized を無視して必ず自前量子化する")
     args = ap.parse_args()
 
     reg = Registry.load(args.registry) if args.registry else Registry.load()
-    models = list(reg.models.values()) if args.all else reg.models_for_profile(args.profile)
+    models = (
+        list(reg.models.values())
+        if args.all
+        else reg.models_for_profile(args.profile, deployed_only=args.deployed_only)
+    )
 
     args.out.mkdir(parents=True, exist_ok=True)
     backend_defaults = reg.backend_defaults

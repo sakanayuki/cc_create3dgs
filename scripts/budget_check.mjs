@@ -144,6 +144,13 @@ const add = (label, value, fmt, rule) => {
 add('JS バンドル (gzip)', jsGzip, kb, budget.bundle?.['js.gzip']);
 add('CSS バンドル (gzip)', cssGzip, kb, budget.bundle?.['css.gzip']);
 add('ORT wasm jsep (gzip)', ortWasmGzip, mb, budget.runtime?.['ort.wasm.gzip']);
+// バックエンドごとの内訳も出す。単一の最大値だけだと、どちらの経路が
+// 重いのか分からず、対策の当てどころが見えない。
+for (const { backend, bytes } of firstVisitPerBackend) {
+  results.push({
+    label: `  ├ ${backend}`, value: bytes, shown: mb(bytes), limit: '', level: 'info',
+  });
+}
 add('初回必須モデル (人物)', firstVisit, mb, budget.models?.['firstVisit.person']);
 add('物体モード追加分', objectExtra, mb, budget.models?.['objectMode.extra']);
 add('モデル合計 (配信側)', modelTotal, mb, budget.models?.total);
@@ -158,24 +165,26 @@ if (metrics) {
 }
 
 // --- 出力 -------------------------------------------------------------------
-const icon = { ok: '  ', warn: '⚠ ', fail: '✗ ' };
+const icon = { ok: '  ', warn: '⚠ ', fail: '✗ ', info: '  ' };
 // 全角文字は2列を占めるので、文字数ではなく表示幅で揃える
 const width = (s) => [...s].reduce((n, c) => n + (/[\u3000-\u9fff\uff00-\uff60]/.test(c) ? 2 : 1), 0);
 const labelWidth = Math.max(...results.map((r) => width(r.label))) + 2;
 console.log('\n性能バジェット\n');
 for (const r of results) {
   const gap = ' '.repeat(Math.max(1, labelWidth - width(r.label)));
-  console.log(`${icon[r.level]}${r.label}${gap}${r.shown.padStart(11)}   (${r.limit})`);
+  const limit = r.limit ? `   (${r.limit})` : '';
+  console.log(`${icon[r.level]}${r.label}${gap}${r.shown.padStart(11)}${limit}`);
 }
 
 const fails = results.filter((r) => r.level === 'fail');
 const warns = results.filter((r) => r.level === 'warn');
-console.log(`\n合格 ${results.length - fails.length - warns.length} / 警告 ${warns.length} / 失敗 ${fails.length}`);
+const judged = results.filter((r) => r.level !== 'info');
+console.log(`\n合格 ${judged.length - fails.length - warns.length} / 警告 ${warns.length} / 失敗 ${fails.length}`);
 if (!metrics) console.log(`（${METRICS} が無いため、出力サイズと品質の判定はスキップしました）`);
 else if (skipped.length) console.log(`（未計測のためスキップ: ${skipped.join('、')}）`);
 
 if (process.env.GITHUB_STEP_SUMMARY) {
-  const rows = results.map((r) => `| ${icon[r.level].trim() || '✓'} | ${r.label} | ${r.shown} | ${r.limit} |`);
+  const rows = results.map((r) => `| ${r.level === 'info' ? '' : icon[r.level].trim() || '✓'} | ${r.label} | ${r.shown} | ${r.limit} |`);
   const md = ['## 性能バジェット', '', '| | 項目 | 実測 | 上限 |', '|---|---|---|---|', ...rows, ''].join('\n');
   const { appendFileSync } = await import('node:fs');
   appendFileSync(process.env.GITHUB_STEP_SUMMARY, md);

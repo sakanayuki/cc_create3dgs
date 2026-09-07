@@ -20,10 +20,16 @@ def main() -> int:
     ap.add_argument("--out", type=Path, required=True, help="取得先ディレクトリ")
     ap.add_argument("--profile", default=None, help="プロファイル名（既定: registry の defaultProfile）")
     ap.add_argument("--all", action="store_true", help="プロファイルに関係なく全モデルを取得")
+    ap.add_argument("--deployed-only", action="store_true",
+                    help="Pages に置くモデルだけ取得する（registry の deploy）")
     args = ap.parse_args()
 
     reg = Registry.load()
-    models = list(reg.models.values()) if args.all else reg.models_for_profile(args.profile)
+    models = (
+        list(reg.models.values())
+        if args.all
+        else reg.models_for_profile(args.profile, deployed_only=args.deployed_only)
+    )
 
     args.out.mkdir(parents=True, exist_ok=True)
     total = 0

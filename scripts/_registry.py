@@ -36,6 +36,17 @@ class Model:
         return str(self.raw.get("quantization", {}).get("mode", "none"))
 
     @property
+    def deploy(self) -> bool:
+        """Pages に置くか。既定は置く。
+
+        置かないモデルも registry には残す。役割（予備・比較対象）は
+        変わらないし、必要になればブラウザが HuggingFace から取れる
+        （src/runtime/modelCatalog.ts の縮退）。誰も落とさないファイルで
+        配信容量を食うのを避けるだけである。
+        """
+        return bool(self.raw.get("deploy", True))
+
+    @property
     def expected_bytes(self) -> int:
         return int(self.raw.get("expectedBytes", 0))
 
@@ -118,10 +129,16 @@ class Registry:
         # 旧形式（バックエンド名の配列だけ）との互換。方式はモデル側に任せる。
         return {str(b): "" for b in bq}
 
-    def models_for_profile(self, name: str | None = None) -> list[Model]:
-        """プロファイルが参照するモデルを重複なく返す。"""
+    def models_for_profile(
+        self, name: str | None = None, deployed_only: bool = False
+    ) -> list[Model]:
+        """プロファイルが参照するモデルを重複なく返す。
+
+        @param deployed_only Pages に置くものだけに絞る。
+        """
         seen: dict[str, Model] = {}
         for model_id in self.profile(name).values():
             if model_id in self.models:
                 seen[model_id] = self.models[model_id]
-        return list(seen.values())
+        models = list(seen.values())
+        return [m for m in models if m.deploy] if deployed_only else models
