@@ -52,7 +52,9 @@ export function configureOrt(opts: { adapter?: GPUAdapter; wasmThreads?: number 
   const base = import.meta.env.BASE_URL ?? '/';
   // 同一オリジンで配る（決定 D7）。scripts/copy_ort.mjs が public/ort/ に置く。
   ort.env.wasm.wasmPaths = `${base}ort/`;
-  // GitHub Pages では SharedArrayBuffer が無いので単スレッド。
+  // GitHub Pages は COOP/COEP を返せないので、素のままでは SharedArrayBuffer が
+  // 無く単スレッドになる。coi-serviceworker で isolation を成立させたうえで
+  // ここにスレッド数を渡す（決定 D20）。渡されなければ単スレッド。
   ort.env.wasm.numThreads = opts.wasmThreads ?? 1;
   ort.env.wasm.simd = true;
   ort.env.logLevel = 'error';

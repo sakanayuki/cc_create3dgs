@@ -165,8 +165,9 @@ async function enableCoi(): Promise<void> {
   if (r.state === 'reloading') {
     $('coiState').className = 'pill run';
     $('coiState').textContent = '再読み込みします…';
-    // Service Worker が制御を取るまで少し待ってからリロードする
-    setTimeout(() => location.reload(), 600);
+    // ensureCrossOriginIsolation が「制御を取るまで」待ってから返しているので、
+    // ここは表示を見せるためだけの短い間を置く
+    setTimeout(() => location.reload(), 200);
   } else {
     showIsolation();
   }

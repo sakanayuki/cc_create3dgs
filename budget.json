@@ -13,7 +13,10 @@
   },
 
   "runtime": {
-    "_comment": "ONNX Runtime Web の wasm。設計 v2 の見積もりに入っていなかった実装上の発見。gzip 後で測る。",
+    "_comment": [
+      "ONNX Runtime Web の wasm。設計 v2 の見積もりに入っていなかった実装上の発見。gzip 後で測る。",
+      "マルチスレッド版(jsep)を配るので、単スレッド版より大きい（決定 D20）。"
+    ],
     "ort.wasm.gzip": { "warn": 7000000, "fail": 9000000 }
   },
 
