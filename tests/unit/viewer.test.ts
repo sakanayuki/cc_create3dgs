@@ -94,7 +94,16 @@ describe('ドラッグの角度換算', () => {
     const a = at(0, 0, 0, 0);
     expect(dragToView(a, 100, 0, W, H).pitch).toBe(0);
     expect(dragToView(a, 0, 100, W, H).yaw).toBe(0);
-    expect(dragToView(a, 0, 100, W, H).pitch).toBeCloseTo(-(100 / H) * LIMITS.pitchComfort * 4, 9);
+    // 縦は横と符号が逆。下へ引いたらカメラが上がる（v2.6 で反転）。
+    expect(dragToView(a, 0, 100, W, H).pitch).toBeCloseTo((100 / H) * LIMITS.pitchComfort * 4, 9);
+  });
+
+  it('下へ引くとカメラが上がり、上へ引くと下がる', () => {
+    const a = at(0, 0, 0, 0);
+    expect(dragToView(a, 0, 100, W, H).pitch, '下へ引いた').toBeGreaterThan(0);
+    expect(dragToView(a, 0, -100, W, H).pitch, '上へ引いた').toBeLessThan(0);
+    // 横は据え置き。右へ引いたら左回り（yaw が減る）。
+    expect(dragToView(a, 100, 0, W, H).yaw).toBeLessThan(0);
   });
 
   it('大きさが 0 でも壊れない', () => {

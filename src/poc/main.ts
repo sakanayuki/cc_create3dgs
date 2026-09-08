@@ -11,6 +11,7 @@ import {
   buildPipelineSplats,
   makeProceduralSplats,
   probePixels,
+  probeOrientation,
   syntheticThreadTarget,
   testModel,
   type Candidate,
@@ -507,6 +508,7 @@ declare global {
   interface Window {
     __photosplat?: {
       probePixels: typeof probePixels;
+      probeOrientation: typeof probeOrientation;
       createRenderer: typeof createRenderer;
       makeProceduralSplats: typeof makeProceduralSplats;
       buildPipelineSplats: typeof buildPipelineSplats;
@@ -514,4 +516,4 @@ declare global {
     };
   }
 }
-window.__photosplat = { probePixels, createRenderer, makeProceduralSplats, buildPipelineSplats, Viewer };
+window.__photosplat = { probePixels, probeOrientation, createRenderer, makeProceduralSplats, buildPipelineSplats, Viewer };

@@ -97,8 +97,9 @@ export function depthToWidthBands(data: Uint8Array, count: number, bands = 4): n
   const hi = q(y, 0.99);
   const step = (hi - lo) / bands;
   const out: number[] = [];
-  for (let b = bands - 1; b >= 0; b--) {
-    const y0 = lo + b * step;
+  // 上は −Y（docs/06 §6.2）。頭は y が小さい側にある。
+  for (let b = 0; b < bands; b++) {
+    const y0 = b === 0 ? -Infinity : lo + b * step;
     const y1 = b === bands - 1 ? Infinity : lo + (b + 1) * step;
     const xs: number[] = [];
     const zs: number[] = [];
@@ -140,10 +141,11 @@ export function renderCoverage(
     const xr = (x[i] as number) * cy + (z[i] as number) * sy;
     const zr = -(x[i] as number) * sy + (z[i] as number) * cy;
     // ワールド z は大きいほど手前（6-splats の toWorld が z を反転している）。
-    const zc = dist - zr;
+    // ワールドは X 右・Y 下・Z 前（奥）。カメラは −Z 側に置いて +Z を向く。
+    const zc = dist + zr;
     if (!(zc > 0.05)) continue;
-    const u = (-xr * f) / zc + W / 2;
-    const v = (-(y[i] as number) * f) / zc + H / 2;
+    const u = (xr * f) / zc + W / 2;
+    const v = ((y[i] as number) * f) / zc + H / 2;
     const rad = Math.max(0.5, ((r[i] as number) * f) / zc);
     const k = Math.min(3, Math.max(0, Math.round(rad)));
     const iu = Math.round(u);

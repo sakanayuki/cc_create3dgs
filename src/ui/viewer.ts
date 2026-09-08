@@ -61,7 +61,9 @@ export function dragToView(
   const h = Math.max(1, height);
   return {
     yaw: anchor.yaw - ((x - anchor.x) / w) * LIMITS.yawComfort * 4,
-    pitch: anchor.pitch - ((y - anchor.y) / h) * LIMITS.pitchComfort * 4,
+    // 下へ引いたらカメラが上がる（＝上から見下ろす）。指で物を手前へ倒す
+    // 感覚に合わせる。横方向とは符号が逆になるが、これは意図である。
+    pitch: anchor.pitch + ((y - anchor.y) / h) * LIMITS.pitchComfort * 4,
   };
 }
 

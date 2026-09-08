@@ -80,6 +80,52 @@ function expectLooksLikeShell(p: Probe): void {
   expect(r + g + bl, `平均色が暗すぎます: ${r},${g},${bl}`).toBeGreaterThan(60);
 }
 
+/**
+ * ワールドの向きが画面のどこに出るか（docs/06 §6.2）。
+ *
+ * 上下・左右の取り違えは、単体テストも既存の描画検査も素通りする。とくに
+ * 軸を 1 つだけ反転すると行列式が −1 になって**鏡像**になるが、対称な
+ * 被写体では見た目が変わらない。非対称な目印を置いて実際に描いて読む。
+ */
+test.describe('ワールドの向き', () => {
+  for (const backend of ['webgl2', 'webgpu'] as const) {
+    test(`${backend}: 上は −Y、右は +X、鏡像にならない`, async ({ page }) => {
+      await page.goto('/poc.html');
+      const r = await page.evaluate(async (b) => {
+        const api = window.__photosplat;
+        if (!api) throw new Error('__photosplat がページに露出していません');
+        const canvas = document.createElement('canvas');
+        canvas.width = 192;
+        canvas.height = 192;
+        document.body.appendChild(canvas);
+        try {
+          return (await api.probeOrientation(canvas, b, 192)) as unknown as {
+            backend: string;
+            found: Record<string, { x: number; y: number } | null>;
+          };
+        } finally {
+          canvas.remove();
+        }
+      }, backend);
+
+      const top = r.found['top'];
+      const bottom = r.found['bottom'];
+      const right = r.found['right'];
+      expect(top, '−Y の目印が描かれていません').not.toBeNull();
+      expect(bottom, '+Y の目印が描かれていません').not.toBeNull();
+      expect(right, '+X の目印が描かれていません').not.toBeNull();
+      const t = top as { x: number; y: number };
+      const b2 = bottom as { x: number; y: number };
+      const rt = right as { x: number; y: number };
+
+      expect(t.y, `−Y が画面の上半分に出ていません (y=${t.y.toFixed(2)})`).toBeLessThan(0.45);
+      expect(b2.y, `+Y が画面の下半分に出ていません (y=${b2.y.toFixed(2)})`).toBeGreaterThan(0.55);
+      // ここが鏡像の検査。+X は画面の右へ出なければならない。
+      expect(rt.x, `+X が画面の右半分に出ていません (x=${rt.x.toFixed(2)})`).toBeGreaterThan(0.55);
+    });
+  }
+});
+
 test.describe('描画のピクセル検証', () => {
   test('WebGL2 が実際にピクセルを描く（D19 フォールバック）', async ({ page }) => {
     const errors: string[] = [];

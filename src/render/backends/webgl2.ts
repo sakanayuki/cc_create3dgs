@@ -336,14 +336,17 @@ export class Webgl2SplatRenderer implements SplatRenderer {
 
     const { yaw, pitch, distance, target } = this.view;
     const cp = Math.cos(pitch);
+    // ワールドは X 右・**Y 下**・**Z 前（奥）**（6-splats.ts の toWorld）。
+    // カメラは被写体の手前、つまり −Z 側に置いて +Z を向く。pitch を上げたら
+    // 見下ろす向き、すなわち y が小さいほうへ動く。
     const eye: [number, number, number] = [
       target[0] + distance * cp * Math.sin(yaw),
-      target[1] + distance * Math.sin(pitch),
-      target[2] + distance * cp * Math.cos(yaw),
+      target[1] - distance * Math.sin(pitch),
+      target[2] - distance * cp * Math.cos(yaw),
     ];
     const aspect = this.width / this.height;
     const fovY = 2 * Math.atan(0.5 / distance);
-    const viewMat = lookAt(eye, target, [0, 1, 0]);
+    const viewMat = lookAt(eye, target, [0, -1, 0]);
     const viewProj = mul(perspective(fovY, aspect, 0.01, 100), viewMat);
 
     // 回転が小さいうちは前回の順序を使い回す（docs/06 §6.5）

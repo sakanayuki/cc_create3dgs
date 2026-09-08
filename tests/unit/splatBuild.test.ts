@@ -122,12 +122,13 @@ describe('前面シェル', () => {
     }
   });
 
-  it('法線が手前（+z）を向く', () => {
-    // 描画側は +z にカメラがある。手前を向いていなければ背面カリングで全部消える。
+  it('法線が手前（−z）を向く', () => {
+    // ワールドは X 右・Y 下・Z 前（奥）で、カメラは −z 側にある（v2.6）。
+    // 手前を向いていなければ背面カリングで全部消える。
     const { result } = build(false);
     const ns = normals(result.data, result.frontCount);
     let facing = 0;
-    for (const n of ns) if (n[2] > 0) facing++;
+    for (const n of ns) if (n[2] < 0) facing++;
     expect(facing / ns.length).toBeGreaterThan(0.98);
   });
 
@@ -149,10 +150,10 @@ describe('前面シェル', () => {
       const wx = p[0] / scale + center[0];
       const wy = p[1] / scale + center[1];
       const wz = p[2] / scale + center[2];
-      // ワールド → パイプライン側カメラ空間（y と z を戻す）
+      // ワールド = パイプライン側カメラ空間（v2.6 から恒等変換）。
       const camX = wx;
-      const camY = -wy;
-      const camZ = -wz;
+      const camY = wy;
+      const camZ = wz;
       // 投影
       const u = (camX * FOCAL) / camZ + S / 2;
       const v = (camY * FOCAL) / camZ + S / 2;
@@ -169,7 +170,7 @@ describe('前面シェル', () => {
     expect(maxZError, `深度の最大誤差 ${maxZError}`).toBeLessThan(1e-4);
   });
 
-  it('中央の点のほうが手前（z が大きい）', () => {
+  it('中央の点のほうが手前（z が小さい）', () => {
     const { result } = build(false);
     const pts = positions(result.data, result.frontCount);
     const center = pts.reduce((best, p) =>
@@ -178,12 +179,12 @@ describe('前面シェル', () => {
     const edge = pts.reduce((best, p) =>
       Math.hypot(p[0], p[1]) > Math.hypot(best[0], best[1]) ? p : best,
     );
-    expect(center[2]).toBeGreaterThan(edge[2]);
+    expect(center[2]).toBeLessThan(edge[2]);
   });
 });
 
 describe('背面シェル', () => {
-  it('前面より奥（z が小さい）に置かれる', () => {
+  it('前面より奥（z が大きい）に置かれる', () => {
     const thickness = new Float32Array(S * S);
     const { alpha } = hemisphere();
     for (let i = 0; i < thickness.length; i++) if ((alpha[i] as number) >= 128) thickness[i] = 0.2;
@@ -213,7 +214,7 @@ describe('背面シェル', () => {
     const front = pts.slice(0, result.frontCount);
     const back = pts.slice(result.frontCount);
     const meanZ = (a: [number, number, number][]) => a.reduce((s, p) => s + p[2], 0) / a.length;
-    expect(meanZ(back)).toBeLessThan(meanZ(front));
+    expect(meanZ(back)).toBeGreaterThan(meanZ(front));
   });
 });
 
@@ -288,13 +289,13 @@ describe('スカート（docs/03 §3.6.3）', () => {
       const rgba = u[(i * SPLAT_BYTES) / 4 + 5] as number;
       alphas.push({ z: (pts[i] as [number, number, number])[2], a: (rgba >>> 24) & 0xff });
     }
-    // z が小さい（奥）ほど α が小さいこと。相関で見る。
+    // z が大きい（奥）ほど α が小さいこと。相関で見る。
     const n = alphas.length;
     const mz = alphas.reduce((s, v) => s + v.z, 0) / n;
     const ma = alphas.reduce((s, v) => s + v.a, 0) / n;
     let cov = 0;
     for (const v of alphas) cov += (v.z - mz) * (v.a - ma);
-    expect(cov, '奥ほど薄い、になっていません').toBeGreaterThan(0);
+    expect(cov, '奥ほど薄い、になっていません').toBeLessThan(0);
   });
 
   it('スカートを切れば枚数はゼロ', () => {

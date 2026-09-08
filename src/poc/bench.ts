@@ -393,6 +393,97 @@ export function makeProceduralSplats(count: number): Uint8Array {
   return new Uint8Array(buf);
 }
 
+/** 向きの検査で使う目印の位置（ワールド座標）と色。 */
+const ORIENT_MARKERS = [
+  { id: 'top', pos: [0, -0.4, 0], rgb: [255, 0, 0] },
+  { id: 'bottom', pos: [0, 0.4, 0], rgb: [0, 255, 0] },
+  { id: 'right', pos: [0.4, 0, 0], rgb: [0, 0, 255] },
+  { id: 'near', pos: [0, 0, -0.4], rgb: [255, 255, 0] },
+] as const;
+
+export interface OrientationProbe {
+  readonly backend: string;
+  /** 目印ごとの画面上の重心（0..1 で正規化。見つからなければ null）。 */
+  readonly found: Record<string, { x: number; y: number } | null>;
+}
+
+/**
+ * ワールドの向きが画面のどこに出るかを実際に描いて確かめる。
+ *
+ * 上下・左右の取り違えは、**単体テストも既存の描画検査も素通りする**。
+ * とくに軸を 1 つだけ反転すると行列式が −1 になって鏡像になるが、
+ * 対称な被写体では見た目が変わらないので気づけない（v2.6 で実際にやった）。
+ * 非対称な目印を 4 つ置いて、出る場所を読む。
+ *
+ * 規約（docs/06 §6.2）: ワールドは X 右・**Y 下**・**Z 前（奥）**。
+ * カメラは −Z 側にあり、画面の上は −Y、画面の右は +X。
+ */
+export async function probeOrientation(
+  canvas: HTMLCanvasElement,
+  force?: RendererBackend,
+  size = 192,
+): Promise<OrientationProbe> {
+  const { renderer, backend } = await createRenderer({ canvas, ...(force ? { force } : {}) });
+  try {
+    const per = 300; // 目印 1 つあたりの粒数。1粒だと当たり判定が細すぎる。
+    const count = ORIENT_MARKERS.length * per;
+    const buf = new ArrayBuffer(count * SPLAT_BYTES);
+    const f32 = new Float32Array(buf);
+    const u32 = new Uint32Array(buf);
+    const stride = SPLAT_BYTES / 4;
+    let k = 0;
+    for (const m of ORIENT_MARKERS) {
+      for (let i = 0; i < per; i++) {
+        // 目印の中で少しだけ散らす（決定的）。
+        const a = (i / per) * Math.PI * 2;
+        const o = k * stride;
+        f32[o] = (m.pos[0] as number) + 0.02 * Math.cos(a);
+        f32[o + 1] = (m.pos[1] as number) + 0.02 * Math.sin(a);
+        f32[o + 2] = m.pos[2] as number;
+        // 法線はカメラ側（−z）へ。背面カリングで消えないように。
+        u32[o + 3] = encodeOct(0, 0, -1);
+        u32[o + 4] = packHalf2(0.05, 0.05);
+        u32[o + 5] = packRgba8(m.rgb[0] as number, m.rgb[1] as number, m.rgb[2] as number, 255);
+        k++;
+      }
+    }
+
+    renderer.resize(size, size);
+    renderer.setSplats(new Uint8Array(buf), count);
+    renderer.setDepthRange(0.5, 1.6);
+    renderer.setCamera({ yaw: 0, pitch: 0, distance: 1.0, target: [0, 0, 0] });
+    for (let i = 0; i < 2; i++) {
+      renderer.render();
+      await renderer.flush();
+    }
+    renderer.render();
+    const px = await renderer.readPixels();
+
+    const found: Record<string, { x: number; y: number } | null> = {};
+    for (const m of ORIENT_MARKERS) {
+      let n = 0;
+      let sx = 0;
+      let sy = 0;
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+          const i = (y * size + x) * 4;
+          const dr = Math.abs((px[i] as number) - (m.rgb[0] as number));
+          const dg = Math.abs((px[i + 1] as number) - (m.rgb[1] as number));
+          const db = Math.abs((px[i + 2] as number) - (m.rgb[2] as number));
+          if ((px[i + 3] as number) < 32 || dr + dg + db > 150) continue;
+          n++;
+          sx += x;
+          sy += y;
+        }
+      }
+      found[m.id] = n > 20 ? { x: sx / n / size, y: sy / n / size } : null;
+    }
+    return { backend, found };
+  } finally {
+    renderer.dispose();
+  }
+}
+
 export async function benchRender(
   canvas: HTMLCanvasElement,
   splatCount: number,
