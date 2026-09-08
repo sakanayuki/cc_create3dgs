@@ -7,6 +7,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
+  boostTaperBand,
   calibrate,
   calmSilhouetteRim,
   enhanceRelief,
@@ -292,25 +293,51 @@ describe('較正（全体）', () => {
     // 残差の形が少し違うので、その差が縁だけで拡大する。実測でも
     // 不一致は外周 10% のリングに全部入っていて、内部は桁違いに小さい。
     // そこで内部は厳しく、全体は分位で見る。
-    const isInterior = eroded(alpha, size, size, RELIEF_BLUR_PX);
+    // 削る幅は**平滑化半径の 2 倍**。v2.6 で、強調を戻す帯をここまで広げた
+    // （輪郭に沿った隆起を消すため）。窓が切られる範囲そのものが半径ぶん
+    // あるので、半径 1 つぶんだけ削っても縁の影響が残る。
+    const isInterior = eroded(alpha, size, size, RELIEF_BLUR_PX * 2);
 
-    let worstInside = 0;
-    let subjectPixels = 0;
-    let disagreeing = 0;
+    // **形は残差で、尺度は傾きで、別々に見る。**
+    //
+    // 生の値をそのまま引き算していたが、それでは 2 つを混ぜて見てしまう。
+    // ⑤ の 0..65535 への写像は被写体の**最小値と最大値**で決まる。その
+    // 2 画素は輪郭の帯にあり、深度モデルのそこは内部の 40 倍ばらつく
+    // （docs/09 §V8）。つまり全体の尺度が最も当てにならない画素で決まる。
+    // v2.6 で強調を戻す帯を広げたとき、形は変わっていないのに傾きだけが
+    // 0.98 → 0.89 に動いてこのテストが落ちた。実写（短辺 466px）では
+    // 奥行き ÷ 幅 が 0.721 → 0.717 と 0.6% しか動かない。この球は投影直径が
+    // 51px しかなく、帯が占める割合が極端に大きいための誇張である。
+    const xs: number[] = [];
+    const ys: number[] = [];
     for (let i = 0; i < depth.length; i++) {
-      if ((alpha[i] as number) < 128) continue;
-      const d = Math.abs((a.depth[i] as number) - (b.depth[i] as number)) / 65535;
-      subjectPixels++;
-      if (d > 0.05) disagreeing++;
-      if (isInterior[i]) worstInside = Math.max(worstInside, d);
+      if (!isInterior[i]) continue;
+      xs.push(a.depth[i] as number);
+      ys.push(b.depth[i] as number);
+    }
+    const n = xs.length;
+    expect(n, '内部の画素が足りません').toBeGreaterThan(200);
+    const mx = xs.reduce((t, v) => t + v, 0) / n;
+    const my = ys.reduce((t, v) => t + v, 0) / n;
+    let sxy = 0;
+    let sxx = 0;
+    for (let i = 0; i < n; i++) {
+      sxy += ((xs[i] as number) - mx) * ((ys[i] as number) - my);
+      sxx += ((xs[i] as number) - mx) ** 2;
+    }
+    const slope = sxy / sxx;
+    const intercept = my - slope * mx;
+    let worstShape = 0;
+    for (let i = 0; i < n; i++) {
+      const r = Math.abs((ys[i] as number) - (slope * (xs[i] as number) + intercept)) / 65535;
+      worstShape = Math.max(worstShape, r);
     }
 
-    // 被写体の内部では、2 つの経路はほぼ一致する（実測 0.009）。
-    expect(worstInside).toBeLessThan(0.02);
-    // ずれるのは縁の画素だけ（実測 8.7%）。この球は投影直径が 51px しか
-    // 無いので、縁の帯が占める割合そのものが大きい。分位で見ると、この
-    // 付近は分布が急で添字 1 つで値が跳ねるため、割合で見る。
-    expect(disagreeing / subjectPixels).toBeLessThan(0.12);
+    // 形は厳しく見る（実測 0.005）。
+    expect(worstShape, `形の残差 ${worstShape.toFixed(4)}`).toBeLessThan(0.02);
+    // 尺度は緩く。上の理由で、この合成球では 1 割ほど動きうる。
+    expect(slope, `尺度の比 ${slope.toFixed(3)}`).toBeGreaterThan(0.85);
+    expect(slope, `尺度の比 ${slope.toFixed(3)}`).toBeLessThan(1.18);
   });
 
   it('被写体が無ければ理由を添えて止まる', () => {
@@ -775,5 +802,106 @@ describe('輪郭の棘を均す（v2.6、境界が突起するとの報告から
     expect(Math.abs((tapered[edge] as number) - (z[edge] as number)))
       .toBeLessThan(Math.abs((plain[edge] as number) - (z[edge] as number)) * 0.7);
     expect(tapered[core]).toBeCloseTo(plain[core] as number, 6);
+  });
+});
+
+describe('輪郭に沿った隆起（アンシャープのハロ、v2.6）', () => {
+  const W = 200;
+  const H = 200;
+  const RADIUS = 8;
+
+  /**
+   * 局所強調は「まわりの平均との差」を増幅する。輪郭では平均を取る窓が
+   * 片側に欠けるので、そこでの差は形ではなく**窓の欠けかた**を写す。増幅
+   * すると輪郭と平行な隆起（アンシャープのハロ）ができる。実写で利用者が
+   * 「各パーツの輪郭に近い位置の変な前起伏」として報告したのがこれで、
+   * 輪の高さは 0..65535 のうち +1423 あった。
+   *
+   * 直し方は「倍率を戻しきる距離を**基底のぼかし半径の 2 倍**にする」こと。
+   * 窓が欠けるのは輪郭から半径ぶんの範囲なので、そこを抜けるまでに戻すと
+   * 隆起が残る。実写で +1423 → +636（−55%）になった。
+   *
+   * ここは `enhanceRelief` を直に見る。`calibrate` を通すと、⑤ の 0..65535
+   * への写像が被写体の最小最大で決まるせいで、合成の被写体では倍率の違いが
+   * 正規化に吸われてしまう（実際に何度か作り直して分かった）。
+   */
+  function plate() {
+    const z = new Float32Array(W * H);
+    const alpha = new Uint8ClampedArray(W * H);
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const nx = (x - W / 2) / 90;
+        const ny = (y - H / 2) / 90;
+        if (nx * nx + ny * ny > 1) continue;
+        const i = y * W + x;
+        alpha[i] = 255;
+        // 波長は、強調が持ち上げる帯に合わせる。内側の窓（半径 3）は
+        // 通し、外側の窓（半径 8）は落とす必要があるので、周期 20px 前後。
+        // 短すぎると内側の窓にも消され、増幅されない（周期 9px で試して
+        // 倍率が 1.18 にしかならなかった）。
+        z[i] = 1 + 0.01 * Math.sin(x / 3.2) * Math.sin(y / 3.2);
+      }
+    }
+    return { z, alpha };
+  }
+
+  /** 中心からの距離が r 付近の輪帯で、しわの振幅を測る。 */
+  function amplitude(a: ArrayLike<number>, alpha: Uint8ClampedArray, rLo: number, rHi: number): number {
+    const v: number[] = [];
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const i = y * W + x;
+        if ((alpha[i] as number) < 128) continue;
+        const r = Math.hypot(x - W / 2, y - H / 2);
+        if (r < rLo || r >= rHi) continue;
+        v.push(a[i] as number);
+      }
+    }
+    if (v.length < 50) return 0;
+    const m = v.reduce((s, x) => s + x, 0) / v.length;
+    return Math.sqrt(v.reduce((s, x) => s + (x - m) ** 2, 0) / v.length);
+  }
+
+  it('帯の幅ぶんは倍率が戻りきらない', () => {
+    const { z, alpha } = plate();
+    const band = RADIUS * 2; // 90px の円盤なので、輪郭から 16px の帯
+    const out = enhanceRelief(z, alpha, W, H, RADIUS, 3, band);
+
+    const gain = (rLo: number, rHi: number): number =>
+      amplitude(out, alpha, rLo, rHi) / Math.max(amplitude(z, alpha, rLo, rHi), 1e-9);
+
+    const core = gain(0, 60); // 輪郭から 30px 以上：戻りきっている
+    const atRadius = gain(90 - RADIUS - 2, 90 - RADIUS + 2); // 輪郭から 8px
+    const atEdge = gain(87, 90); // 輪郭から 0〜3px
+
+    expect(core, `内部の倍率 ${core.toFixed(2)}`).toBeGreaterThan(2.0);
+    expect(
+      atRadius / core,
+      `半径の位置 ${(atRadius / core).toFixed(2)}（内部を 1 とする）`,
+    ).toBeLessThan(0.85);
+    expect(atEdge / core, `縁 ${(atEdge / core).toFixed(2)}`).toBeLessThan(0.6);
+  });
+
+  it('calibrate が渡す帯は、ぼかし半径の 2 倍', () => {
+    // 上の 2 つは enhanceRelief に帯を直接渡して確かめている。ここは
+    // 「calibrate が実際にその幅を渡すか」を押さえる。実写の短辺 466px では
+    // 半径 19px なので 38px になる。
+    expect(boostTaperBand(19, 16)).toBe(38);
+    expect(boostTaperBand(2, 2)).toBe(4);
+    // 棘を均す帯のほうが広ければ、そちらに合わせる（狭めない）。
+    expect(boostTaperBand(4, 20)).toBe(20);
+  });
+
+  it('帯を狭めると、半径の位置で戻りきってしまう（直す前の挙動）', () => {
+    // なぜ 2 倍が要るのかを、狭い帯との対比で残す。
+    const { z, alpha } = plate();
+    const narrow = enhanceRelief(z, alpha, W, H, RADIUS, 3, Math.round(RADIUS * 0.9));
+    const wide = enhanceRelief(z, alpha, W, H, RADIUS, 3, RADIUS * 2);
+    const at = (a: ArrayLike<number>): number =>
+      amplitude(a, alpha, 90 - RADIUS - 2, 90 - RADIUS + 2);
+    expect(
+      at(narrow),
+      `半径の位置での振幅 狭い帯 ${at(narrow).toFixed(5)} / 広い帯 ${at(wide).toFixed(5)}`,
+    ).toBeGreaterThan(at(wide));
   });
 });

@@ -330,9 +330,21 @@ export function flattenImplausibleBands(
   return out;
 }
 
-/** 被写体内の頑健な奥行き幅（p1..p99）。強調の前後で比べるのに使う。 */
-function subjectExtent(values: ArrayLike<number>, alpha: ArrayLike<number>): number {
-  const [lo, hi] = percentileOfSubject(values, alpha, [0.01, 0.99]) as [number, number];
+/**
+ * 被写体内の頑健な奥行き幅（p1..p99）。強調の前後で比べるのに使う。
+ *
+ * `mask` を渡すと、そこが 1 の画素だけで測る。**輪郭の帯を外して測るため**に
+ * ある。深度モデルの縁は内部の 40 倍ばらつく（docs/09 §V8）ので、そこを
+ * 含めると全体の尺度がいちばん当てにならない画素で決まってしまう。実際、
+ * 縁の扱いを変えただけで全体の奥行きが 11% 動き、深度経路と逆深度経路の
+ * 尺度が食い違った。
+ */
+function subjectExtent(
+  values: ArrayLike<number>,
+  alpha: ArrayLike<number>,
+  mask?: ArrayLike<number>,
+): number {
+  const [lo, hi] = percentileOfSubject(values, mask ?? alpha, [0.01, 0.99]) as [number, number];
   return hi - lo;
 }
 
@@ -648,12 +660,25 @@ export function enhanceRelief(
   radius: number,
   boost: number,
   /**
-   * この画素数ぶんの輪郭の帯では、強調を 1 倍へ落とす（v2.6）。
+   * この画素数ぶんの輪郭の帯では、強調を 1 倍へ落とす。
    *
    * アンシャープマスクは「まわりの平均」との差を増幅する。輪郭では平均を
    * 取る窓が片側に欠けるので、その差は形ではなく**窓の欠けかた**を写す。
    * そこを 3 倍すると縁が前後へ棘のように飛び出す。0 なら従来どおり
    * 全面を強調する。
+   *
+   * **幅は基底のぼかし半径の 2 倍にすること**（v2.6 で改訂）。窓が欠けるのは
+   * 輪郭から `outer` 画素の範囲なので、そこを抜けるまで戻しきってはいけない。
+   * 実測（輪郭に沿ってできる隆起の高さ / 内部の起伏）:
+   *
+   * | 帯の幅 | 輪の高さ | 内部の起伏 |
+   * |---|---|---|
+   * | 強調なし | 0.0007 | 0.0114 |
+   * | 16px（半径 19 に対して狭い） | 0.0036 | 0.0312 |
+   * | **38px = 半径 × 2** | **0.0012** | **0.0312** |
+   * | 57px = 半径 × 3 | 0.0010 | 0.0312 |
+   *
+   * 幅を広げても内部の起伏は減らない。輪だけが消える。
    */
   rimBand = 0,
 ): Float32Array {
@@ -691,10 +716,33 @@ export function enhanceRelief(
     }
     const b = base[i] as number;
     const f = fine[i] as number;
-    const k = rim ? 1 + (boost - 1) * Math.min(1, (rim[i] as number) / rimBand) : boost;
+    // 立ち上がりは滑らかに。直線だと倍率の折れ目がそのまま深度の折れ目に
+    // なる（実測で輪の高さが 0.0019 → 0.0012 に下がった）。
+    const t = rim ? Math.min(1, (rim[i] as number) / rimBand) : 1;
+    const k = rim ? 1 + (boost - 1) * t * t * (3 - 2 * t) : boost;
     out[i] = b + (f - b) * k + ((z[i] as number) - f);
   }
   return out;
+}
+
+/**
+ * 強調の倍率を 1 から戻しきるまでの距離（画素）。
+ *
+ * **基底のぼかし半径の 2 倍**。アンシャープマスクの窓が輪郭で欠けるのは
+ * 「輪郭から半径ぶん」の範囲なので、そこを抜けるまでに戻すと輪郭に沿った
+ * 隆起（ハロ）が残る。実写での輪の高さ（0..65535）:
+ *
+ * | 帯の幅 | 輪の高さ |
+ * |---|---|
+ * | 強調なし | −32 |
+ * | 16px（短辺 × 0.035。半径 19 に対して狭い） | +1423 |
+ * | **38px = 半径 × 2** | **+636** |
+ *
+ * 棘を均す帯（`calmSilhouetteRim`）とは別に決める。あちらは縁の雑音を
+ * 落とすためのもので、こちらは窓の欠けを避けるためのものである。
+ */
+export function boostTaperBand(reliefRadiusPx: number, rimBandPx: number): number {
+  return Math.max(rimBandPx, reliefRadiusPx * 2);
 }
 
 /**
@@ -865,12 +913,30 @@ export function calibrate(input: CalibrationInput): CalibrationResult {
   const rimBand = input.rimBand ?? Math.max(2, Math.round(shortSide * RIM_BAND_RATIO));
   z = calmSilhouetteRim(z, alpha, width, height, rimBand, Math.max(2, Math.round(radius / 2)));
 
+  // 強調を戻す帯は、棘を均す帯とは別に決める。こちらは**基底のぼかし半径の
+  // 2 倍**。窓が欠けるのは輪郭から半径ぶんの範囲なので、そこを抜けるまで
+  // 倍率を戻すと、輪郭に沿った隆起（アンシャープのハロ）が残る。
+  const boostBand = boostTaperBand(radius, rimBand);
+
+  // 尺度を測る「内部」。輪郭から boostBand より内側だけを使う。細い被写体で
+  // 空になったら被写体全体に戻す。
+  const rimDist = silhouetteDistance(alpha, width, height, Math.ceil(boostBand) + 1);
+  const interior = new Uint8ClampedArray(alpha.length);
+  let interiorCount = 0;
+  for (let i = 0; i < interior.length; i++) {
+    const inside =
+      (alpha[i] as number) >= SUBJECT_THRESHOLD && (rimDist[i] as number) >= boostBand;
+    interior[i] = inside ? 255 : 0;
+    if (inside) interiorCount++;
+  }
+  const extentMask = interiorCount >= 256 ? interior : undefined;
+
   // --- ③ 局所の起伏を持ち上げる
   //
   // 上がるのは顔の凹凸や服のしわだけ。大域の形（＝体の奥行きの比率）は
   // 変えない。輪郭の帯では強調を 1 倍へ落とす（②.5 参照）。
-  const beforeBoost = subjectExtent(z, alpha);
-  z = enhanceRelief(z, alpha, width, height, radius, boost, rimBand);
+  const beforeBoost = subjectExtent(z, alpha, extentMask);
+  z = enhanceRelief(z, alpha, width, height, radius, boost, boostBand);
 
   // 強調は「平滑化からのずれ」を倍にするので、切り残した外れ値も倍になる。
   // クリップの縁に張り付いた画素が、強調後に大きく飛び出す。もう一度
@@ -892,7 +958,7 @@ export function calibrate(input: CalibrationInput): CalibrationResult {
     //
     // 幅を戻すと局所の起伏も同じ率で縮むが、**まわりに対する比**は上がった
     // ままである。欲しいのはその比であって、絶対の奥行きではない。
-    const afterBoost = subjectExtent(z, alpha);
+    const afterBoost = subjectExtent(z, alpha, extentMask);
     if (afterBoost > 1e-9 && beforeBoost > 1e-9) {
       const k = beforeBoost / afterBoost;
       if (k < 1) {
