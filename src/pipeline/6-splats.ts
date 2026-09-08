@@ -48,7 +48,22 @@ export interface BuildParams {
   readonly spread: number;
   /** 傾斜面での引き伸ばしの上限。`1/max(|n·v|, cosLimit)`。 */
   readonly cosLimit: number;
-  /** 背面シェルを作るか。 */
+  /**
+   * 背面シェルを作るか。**既定は false**（v2.6）。
+   *
+   * 実測すると、私たちのビューアでは背面シェルは **±60° で 1 枚も描かれない**。
+   * サーフェルの法線で表裏を落としているので、全部カリングされる
+   * （実測: 背面ありとなしで、0°/20°/40°/60° の描画枚数が完全に一致した）。
+   * つまり自分のビューアでは費用だけがかかっている（枚数の 19%）。
+   *
+   * さらに悪いのは**他のビューアでの見え方**である。面カリングは通常の 3DGS
+   * には無い最適化なので、書き出した `.splat` を一般のビューアで開くと
+   * 背面シェルがそのまま描かれ、`backShade` で暗くした殻が前面越しに透けて
+   * 斑に見える。参照実装（他ソフト）が背面を持たないのはこのためだろう。
+   *
+   * 穴が増えるのは 60° で 1.4% → 1.8% と僅かで、連結性は 100% のまま。
+   * 引き換えに枚数が 23% 減る。
+   */
   readonly backShell: boolean;
   /** 背面シェルの密度（前面に対する間引き。2 なら 2×2 統合＝1/4）。 */
   readonly backStride: number;
@@ -94,7 +109,7 @@ export interface BuildParams {
 export const DEFAULT_BUILD_PARAMS: BuildParams = {
   spread: 1.4,
   cosLimit: 0.3,
-  backShell: true,
+  backShell: false,
   backStride: 2,
   backShade: 0.55,
   rimWidth: 2,

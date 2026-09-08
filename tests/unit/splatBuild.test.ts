@@ -207,6 +207,8 @@ describe('背面シェル', () => {
       alpha,
       thickness,
       null,
+      // 背面シェルは既定で作らない（v2.6）。ここはその機能自体の検査なので明示する。
+      { ...DEFAULT_BUILD_PARAMS, backShell: true },
     );
 
     expect(result.count).toBeGreaterThan(result.frontCount);

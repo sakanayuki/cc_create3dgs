@@ -191,13 +191,36 @@ describe('斜めから見たときの健全性（v2.3、実写での破綻にも
     }
   });
 
-  it('斜めにしてもシルエットの内側が穴だらけにならない', () => {
+  it('回しても、正面より穴が増えない', () => {
+    // **絶対値では見ない。** ここの描画器は被写体（68×116px）を 200×280 に
+    // 拡大して描くので、1画素1スプラットでも隙間が残る。v2.6 で背面シェルを
+    // やめるまでは、その隙間を背面シェルが裏から埋めていて 0% に見えていた
+    // ——つまり測っていたのは前面の被覆ではなかった。実写（1024²）では
+    // 背面なしでも 0.8% である。
+    //
+    // 意図は「回したときに面が抜けないこと」なので、正面を基準に比べる。
     const { depth, color, alpha } = capsule();
     const b = build(depth, color, alpha);
-    for (const yawDeg of [0, 15, 30]) {
+    const base = viewMetrics(b.data, b.count, { yawDeg: 0 }).holeRatio;
+    for (const yawDeg of [15, 30, 45]) {
       const m = viewMetrics(b.data, b.count, { yawDeg });
-      expect(m.holeRatio, `yaw ${yawDeg} の穴率 ${(m.holeRatio * 100).toFixed(1)}%`).toBeLessThan(0.1);
+      expect(
+        m.holeRatio,
+        `yaw ${yawDeg} の穴率 ${(m.holeRatio * 100).toFixed(1)}%（正面 ${(base * 100).toFixed(1)}%）`,
+      ).toBeLessThan(base + 0.02);
     }
+  });
+
+  it('背面シェルは既定で作らない（開いたレリーフ）', () => {
+    // 私たちのビューアはサーフェルの法線で表裏を落とすので、背面シェルは
+    // ±60° で 1 枚も描かれない（実写で、背面あり・なしの描画枚数が
+    // 0°/20°/40°/60° とも完全に一致した）。一方、面カリングは通常の 3DGS には
+    // 無い最適化なので、**他のビューアでは暗い殻がそのまま描かれる**。
+    // 書き出すファイルとしては害しかない。
+    const { depth, color, alpha } = capsule();
+    const b = build(depth, color, alpha);
+    expect(b.backCount, '背面シェルが作られています').toBe(0);
+    expect(b.frontCount).toBeGreaterThan(1000);
   });
 
   it('輪郭のにじみを引き込むと、回したときに膜が出てこない', () => {
@@ -279,8 +302,12 @@ describe('斜めから見たときの健全性（v2.3、実写での破綻にも
     // 串のように崩れていた。この指標は連結性でも穴率でも捕まらない。
     const { depth, color, alpha } = capsule();
     const b = build(depth, color, alpha);
+    //
+    // 下限は 0.25。v2.6 で背面シェルをやめたぶん、点群の奥行きは薄くなる
+    // （このカプセルで 0.42 → 0.32、実写で 0.73 → 0.68）。開いたレリーフでは
+    // これが正しい値である。
     const r = depthToWidth(b.data, b.count);
-    expect(r, `奥行き ÷ 幅 = ${r.toFixed(3)}`).toBeGreaterThan(0.4);
+    expect(r, `奥行き ÷ 幅 = ${r.toFixed(3)}`).toBeGreaterThan(0.25);
     expect(r, `奥行き ÷ 幅 = ${r.toFixed(3)}`).toBeLessThan(1.4);
   });
 

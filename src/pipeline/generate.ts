@@ -805,11 +805,13 @@ export async function generate(photo: Blob, options: GenerateOptions): Promise<G
   );
 
   report(0.9, '厚みをつけています');
-  const thickness = await mark('厚みマップ', () =>
-    thicknessMap(alpha, grid, grid, { maxThickness: BACK_SHELL_THICKNESS, profile: 'ellipsoid' }),
-  );
-
   const buildParams: BuildParams = { ...DEFAULT_BUILD_PARAMS, ...opts.params };
+  // 厚みマップは背面シェルにしか使わない。作らないなら計算もしない。
+  const thickness = buildParams.backShell
+    ? await mark('厚みマップ', () =>
+        thicknessMap(alpha, grid, grid, { maxThickness: BACK_SHELL_THICKNESS, profile: 'ellipsoid' }),
+      )
+    : null;
   const camera = {
     cells,
     normals,
