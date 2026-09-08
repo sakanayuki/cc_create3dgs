@@ -7,7 +7,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import sys
+import urllib.request
 from pathlib import Path
 
 from huggingface_hub import hf_hub_download
@@ -36,6 +38,20 @@ def main() -> int:
     for m in models:
         dest_dir = args.out / m.id
         dest_dir.mkdir(parents=True, exist_ok=True)
+
+        # HF ではなく直接 URL から取るモデル（u2netp）
+        if m.url:
+            dest = m.raw_path(args.out)
+            print(f"[fetch] {m.id}: {m.url}", flush=True)
+            urllib.request.urlretrieve(m.url, dest)  # noqa: S310 - registry の固定 URL
+            data = dest.read_bytes()
+            got = hashlib.sha256(data).hexdigest()
+            if m.sha256 and got != m.sha256:
+                print(f"[fetch] {m.id}: SHA256 が違う\n  期待 {m.sha256}\n  実際 {got}", file=sys.stderr)
+                return 1
+            total += len(data)
+            print(f"        -> {len(data) / 1e6:.1f} MB (sha256 一致)", flush=True)
+            continue
 
         # 公開済みの量子化版があればそれも落としておく（CI での再量子化を省ける）
         wanted = list(m.hf_files())

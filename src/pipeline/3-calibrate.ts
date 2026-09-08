@@ -30,6 +30,12 @@ export interface CalibrationInput {
    * 省略時は既定値 0.65 を使う。
    */
   readonly depthToWidthRatio?: number;
+
+  /**
+   * 帯ごとの「奥行き ÷ 幅」の上限。既定は PLAUSIBLE_BAND_DEPTH_TO_WIDTH。
+   * 実寸経路（depthToWidthRatio 未指定）でのみ効く。
+   */
+  readonly bandMaxRatio?: number;
   /**
    * 局所的な起伏の強調倍率（1 で無効）。
    *
@@ -88,6 +94,226 @@ const DEFAULT_RELIEF_RADIUS = 0.04;
  * 正規化する」処理になっている。実寸を信じきれない以上それが正しい。
  */
 const PLAUSIBLE_DEPTH_TO_WIDTH = { min: 0.40, max: 0.85 } as const;
+
+/**
+ * 帯ごとの「奥行き ÷ 幅」の上限（flattenImplausibleBands 用）。
+ *
+ * 実写 2 枚（座位・立位）で振って、理想側との**帯ごとの差の合計**で選んだ。
+ * 数字が小さいほど平らになる。
+ *
+ * | 上限 | 座位の差 | 立位の差 | 合計 |
+ * |---|---|---|---|
+ * | なし | 1.92 | 0.75 | 2.67 |
+ * | 1.00 | 1.47 | 0.16 | 1.63 |
+ * | 0.85 | 1.19 | 0.21 | 1.40 |
+ * | **0.70** | **0.97** | **0.68** | **1.65** |
+ * | 0.50 | 0.82 | 1.38 | 2.20 |
+ *
+ * 合計だけ見れば 0.85 が最小だが、それは立位がほぼ一致するからで、座位の
+ * 胸は 0.92（理想 0.14）と深いままである。今回直したいのは**回すと胴が
+ * 横に裂ける**ことなので、35° から描いて見比べ、裂け目がいちばん小さい
+ * 0.70 を採った。立位はこの値で理想より 2 割ほど浅くなるが、破綻はしない。
+ *
+ * 0.50 まで絞ると座位はさらに良くなるが、立位を**上限なしより悪くする**。
+ * 立位は体が細く帯ごとの比が元から 0.81〜1.05 あるので、そこを 0.50 で
+ * 切ると人が板になる。
+ */
+const PLAUSIBLE_BAND_DEPTH_TO_WIDTH = 0.70;
+
+/**
+ * 高さ方向の帯ごとに「奥行き ÷ 幅」を見て、人体としてあり得ない帯だけ潰す
+ * （v2.5、他実装との比較で追加）。
+ *
+ * 全体でひとつの比を見るだけでは足りない。座った人物は伸ばした脚で幅が
+ * 決まるので、**全体の比が正しくても胴だけが極端に深い**という壊れ方が
+ * 起きる。実測（他実装 対 こちら）:
+ *
+ * | 部位 | 理想 | こちら | 比 |
+ * |---|---|---|---|
+ * | 頭 | 0.51 | 1.34 | 2.6 倍 |
+ * | 胸 | 0.14 | 1.18 | 8.4 倍 |
+ * | 腰/膝 | 0.68 | 0.66 | 1.0 倍 |
+ * | 脚 | 0.73 | 0.70 | 1.0 倍 |
+ * | **全体** | **0.76** | **0.81** | **1.1 倍** |
+ *
+ * 脚が幅を決めるので全体の比は合ってしまい、胴の 8 倍が隠れる。斜め
+ * 35° から見ると、この胴が横方向の裂け目になって現れる。
+ *
+ * 帯ごとの中央値 m(y) は動かさず、その周りの広がりだけを k(y) 倍する。
+ * 帯どうしの前後関係は保たれるので、体が分断されない。m も k も y 方向に
+ * 平滑化してから使う。
+ *
+ * 上限の選び方は PLAUSIBLE_BAND_DEPTH_TO_WIDTH の表を見よ。人体の帯ごとの
+ * 比は姿勢と部位で 0.14〜1.05 と 7 倍も違うので、絞りすぎると本物の形まで
+ * 潰れる。
+ */
+export function flattenImplausibleBands(
+  z: Float32Array,
+  alpha: ArrayLike<number>,
+  width: number,
+  height: number,
+  focalPx: number,
+  maxRatio: number,
+  bandCount = 12,
+): Float32Array {
+  // 被写体の y 範囲
+  let y0 = height;
+  let y1 = -1;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if ((alpha[y * width + x] as number) >= SUBJECT_THRESHOLD) {
+        if (y < y0) y0 = y;
+        if (y > y1) y1 = y;
+        break;
+      }
+    }
+  }
+  if (y1 < y0) return z;
+  const bandH = Math.max(1, Math.ceil((y1 - y0 + 1) / bandCount));
+
+  // 行ごとの幅。比の分母は**帯ではなく行**の幅で取る。
+  //
+  // 帯の外接幅（xhi - xlo）で割ると、帯の中で最も広い行が分母を決める。
+  // 胴と脚の境目にかかる帯では、脚の幅で胴の奥行きを割ることになり、比が
+  // 小さく出て「問題なし」と判定されてしまう（自分のテストで、境目に接する
+  // 帯が素通りし、胴の下半分が 1.55 のまま残るのを見つけた）。
+  //
+  // ならすのは**5 行の中央値**まで。マットの毛羽立ちは消えるが、シルエットが
+  // 本当に広がる所は広がったままになる。ここを移動平均にすると、幅の階段が
+  // 前後 ±(帯の高さ/2) 行へにじみ、境目の手前が素通りして同じ穴が残る
+  // （胴の下半分が 1.46 のまま残った）。
+  const rowWidth = new Float32Array(height);
+  for (let y = y0; y <= y1; y++) {
+    let xlo = width;
+    let xhi = -1;
+    for (let x = 0; x < width; x++) {
+      if ((alpha[y * width + x] as number) < SUBJECT_THRESHOLD) continue;
+      if (x < xlo) xlo = x;
+      if (x > xhi) xhi = x;
+    }
+    rowWidth[y] = xhi >= xlo ? xhi - xlo + 1 : 0;
+  }
+  const rowWidthS = new Float32Array(height);
+  for (let y = y0; y <= y1; y++) {
+    const w: number[] = [];
+    for (let d = -2; d <= 2; d++) {
+      const yy = y + d;
+      if (yy < y0 || yy > y1) continue;
+      const v = rowWidth[yy] as number;
+      if (v > 0) w.push(v);
+    }
+    w.sort((a, b) => a - b);
+    rowWidthS[y] = w.length > 0 ? (w[w.length >> 1] as number) : (rowWidth[y] as number);
+  }
+
+  // 帯ごとの中央値と広がり。帯は半分ずつ重ねて、境目を作らない。
+  const centers: number[] = [];
+  const meds: number[] = [];
+  const spreads: number[] = [];
+  for (let b = 0; ; b++) {
+    const bs = y0 + Math.round((b * bandH) / 2);
+    const be = Math.min(y1, bs + bandH - 1);
+    if (bs > y1) break;
+    const zs: number[] = [];
+    for (let y = bs; y <= be; y++) {
+      for (let x = 0; x < width; x++) {
+        const i = y * width + x;
+        if ((alpha[i] as number) < SUBJECT_THRESHOLD) continue;
+        const v = z[i] as number;
+        if (Number.isFinite(v)) zs.push(v);
+      }
+    }
+    centers.push((bs + be) / 2);
+    // 分位を取るのに必要な最低限。細い被写体（棒・腕だけ）でも帯あたり
+    // 十数画素は残るので、ここを大きくすると帯が丸ごと素通りする。
+    if (zs.length < 16) {
+      meds.push(NaN);
+      spreads.push(NaN);
+      if (be >= y1) break;
+      continue;
+    }
+    zs.sort((a, c) => a - c);
+    const q = (f: number): number => zs[Math.floor(f * (zs.length - 1))] as number;
+    meds.push(q(0.5));
+    spreads.push(q(0.98) - q(0.02));
+    if (be >= y1) break;
+  }
+
+  // 平滑化（3点移動平均）。急に値が変わると帯の境目が段差になる。
+  const smooth = (a: number[]): number[] =>
+    a.map((_, i) => {
+      let sum = 0;
+      let n = 0;
+      for (let d = -1; d <= 1; d++) {
+        const v = a[i + d];
+        if (v !== undefined && Number.isFinite(v)) {
+          sum += v;
+          n++;
+        }
+      }
+      return n > 0 ? sum / n : (a[i] as number);
+    });
+  const sS = smooth(spreads);
+  const mS = smooth(meds);
+
+  /** 行 y での値を、帯の中心どうしで線形に補間する。 */
+  const at = (arr: number[], y: number, fallback: number): number => {
+    if (arr.length === 0) return fallback;
+    if (y <= (centers[0] as number)) return Number.isFinite(arr[0] as number) ? (arr[0] as number) : fallback;
+    const last = arr.length - 1;
+    if (y >= (centers[last] as number)) {
+      return Number.isFinite(arr[last] as number) ? (arr[last] as number) : fallback;
+    }
+    for (let i = 1; i < arr.length; i++) {
+      const c0 = centers[i - 1] as number;
+      const c1 = centers[i] as number;
+      if (y <= c1) {
+        const a0 = arr[i - 1] as number;
+        const a1 = arr[i] as number;
+        if (!Number.isFinite(a0) || !Number.isFinite(a1)) return fallback;
+        const t = c1 > c0 ? (y - c0) / (c1 - c0) : 0;
+        return a0 + (a1 - a0) * t;
+      }
+    }
+    return fallback;
+  };
+
+  // 行ごとの倍率。分子（広がり）は帯から、分母（幅）はその行から取る。
+  //
+  // ここで k を y 方向に平滑化してはいけない。分子はすでに帯で均されていて
+  // 滑らかなので、k が急に変わるのは**シルエットの幅が本当に段になる所**
+  // だけである。そこを均すと、上の rowWidthS を移動平均にしたのと同じで、
+  // 段の手前が素通りする。
+  const ks = new Float32Array(height).fill(1);
+  let touched = false;
+  for (let y = y0; y <= y1; y++) {
+    const m = at(mS, y, NaN);
+    const spread = at(sS, y, NaN);
+    const w = rowWidthS[y] as number;
+    if (!Number.isFinite(m) || !Number.isFinite(spread) || !(w > 0)) continue;
+    const worldWidth = (w / focalPx) * Math.max(m, 1e-6);
+    const ratio = worldWidth > 0 ? spread / worldWidth : 0;
+    if (ratio > maxRatio) {
+      ks[y] = maxRatio / ratio;
+      touched = true;
+    }
+  }
+  if (!touched) return z;
+
+  const out = new Float32Array(z);
+  for (let y = y0; y <= y1; y++) {
+    const k = ks[y] as number;
+    if (k >= 0.999) continue;
+    const m = at(mS, y, NaN);
+    if (!Number.isFinite(m)) continue;
+    for (let x = 0; x < width; x++) {
+      const i = y * width + x;
+      if ((alpha[i] as number) < SUBJECT_THRESHOLD) continue;
+      out[i] = m + ((z[i] as number) - m) * k;
+    }
+  }
+  return out;
+}
 
 /** 被写体内の頑健な奥行き幅（p1..p99）。強調の前後で比べるのに使う。 */
 function subjectExtent(values: ArrayLike<number>, alpha: ArrayLike<number>): number {
@@ -586,6 +812,27 @@ export function calibrate(input: CalibrationInput): CalibrationResult {
       for (let i = 0; i < z.length; i++) z[i] = ((z[i] as number) - medianZ) * k + medianZ;
       [lo, hi] = percentileOfSubject(z, alpha, [0.01, 0.99]) as [number, number];
     }
+  }
+
+  // --- ④.5 人体としてあり得ない帯だけ潰す
+  //
+  // ④の全体クランプでは捕まらない壊れ方がある。座位では脚が幅を決めるので
+  // 全体の比は合ってしまい、胴だけが 8 倍深いまま通る。
+  //
+  // **④より後**に置くこと。先に潰すと全体の比が下限 0.40 を割り、④が
+  // 全体を拡大し直して帯の圧縮を打ち消す（自分のテストで、胴の比が
+  // 2.40 → 3.06 と**悪化**しているのを見つけた）。帯を潰した結果として
+  // 全体が薄くなるのは意図どおりなので、下限に引っかけてはいけない。
+  if (metric) {
+    z = flattenImplausibleBands(
+      z,
+      alpha,
+      width,
+      height,
+      focalPx,
+      input.bandMaxRatio ?? PLAUSIBLE_BAND_DEPTH_TO_WIDTH,
+    );
+    [lo, hi] = percentileOfSubject(z, alpha, [0.01, 0.99]) as [number, number];
   }
 
   // --- ⑤ 0..65535 に写す

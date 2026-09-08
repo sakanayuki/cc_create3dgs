@@ -6,6 +6,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
+  applyMatteGate,
   boxFilter,
   connectedComponents,
   fillInteriorHoles,
@@ -216,5 +217,60 @@ describe('後処理ひとまとめ', () => {
     const ratio = area(out) / area(truth);
     expect(ratio).toBeGreaterThan(0.85);
     expect(ratio).toBeLessThan(1.15);
+  });
+});
+
+describe('領域の門でマットを絞る（v2.5、実写での破綻にもとづく）', () => {
+  const W = 40;
+  const H = 40;
+
+  /** 人物（左）と、それに触れていない敷物（右下）。 */
+  function scene(): { fine: Uint8ClampedArray; gate: Uint8ClampedArray } {
+    const fine = new Uint8ClampedArray(W * H);
+    const gate = new Uint8ClampedArray(W * H);
+    for (let y = 6; y < 26; y++) {
+      for (let x = 6; x < 16; x++) {
+        fine[y * W + x] = 255;
+        gate[y * W + x] = 255;
+      }
+    }
+    // 敷物: 輪郭モデルだけが被写体と誤認する。門は認めない。
+    for (let y = 28; y < 36; y++) for (let x = 20; x < 36; x++) fine[y * W + x] = 254;
+    return { fine, gate };
+  }
+
+  it('門が認めない領域を落とす', () => {
+    const { fine, gate } = scene();
+    const out = applyMatteGate(fine, gate, W, H, 0);
+    expect(out[30 * W + 28], '敷物が残っています').toBe(0);
+    expect(out[15 * W + 10], '人物が消えています').toBe(255);
+  });
+
+  it('門の中では輪郭モデルの値をそのまま通す（半透明も保つ）', () => {
+    const { fine, gate } = scene();
+    // 髪のような半端な α。門は 255 なので触られないはず。
+    fine[10 * W + 7] = 90;
+    const out = applyMatteGate(fine, gate, W, H, 0);
+    expect(out[10 * W + 7]).toBe(90);
+  });
+
+  it('門を膨らませるので、輪郭モデルのはみ出しぶんを削らない', () => {
+    const { fine, gate } = scene();
+    // 輪郭モデルは門より 2px 外まで被写体を取る（髪の生え際など）。
+    for (let y = 6; y < 26; y++) for (let x = 4; x < 6; x++) fine[y * W + x] = 200;
+
+    const tight = applyMatteGate(fine, gate, W, H, 0);
+    expect(tight[15 * W + 4], '膨らませないと縁が削れる').toBe(0);
+
+    const grown = applyMatteGate(fine, gate, W, H, 4);
+    expect(grown[15 * W + 4], '膨らませた門は縁を残す').toBe(200);
+    expect(grown[30 * W + 28], '膨らませても敷物までは届かない').toBe(0);
+  });
+
+  it('門が全面を認めるなら何も変わらない', () => {
+    const { fine } = scene();
+    const all = new Uint8ClampedArray(W * H).fill(255);
+    const out = applyMatteGate(fine, all, W, H, 4);
+    for (let i = 0; i < out.length; i++) expect(out[i]).toBe(fine[i]);
   });
 });

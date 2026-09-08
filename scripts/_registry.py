@@ -68,6 +68,24 @@ class Model:
     def hf_repo(self) -> str:
         return str(self.raw["hf"]["repo"])
 
+    @property
+    def url(self) -> str | None:
+        """HF ではなく直接 URL から取るモデルの取得先。
+
+        すべてのモデルが HF にあるわけではない。u2netp の重みは Apache-2.0 だが、
+        ライセンスを明示している ONNX の配布は rembg（MIT）の GitHub リリースで、
+        HF 側の同一ファイル（SHA256 一致）には表記が無い。素性のはっきりする
+        ほうから取る。
+        """
+        v = self.raw.get("url")
+        return str(v) if v else None
+
+    @property
+    def sha256(self) -> str | None:
+        """取得したファイルの照合用。URL 取得では改竄・差し替えを見張る必要がある。"""
+        v = self.raw.get("sha256")
+        return str(v) if v else None
+
     def modes_by_backend(self, defaults: dict[str, str]) -> dict[str, str]:
         """バックエンドごとの量子化方式（決定 D22）。
 
@@ -91,6 +109,8 @@ class Model:
 
     # --- 配置先 ---
     def raw_path(self, out: Path) -> Path:
+        if self.url:
+            return out / self.id / Path(self.url).name
         return out / self.id / Path(self.raw["hf"]["file"]).name
 
     def out_path(self, out: Path) -> Path:

@@ -20,3 +20,7 @@ scratch/
 # テスト実行成果物（トレース・スクリーンショット）
 tests/results/
 playwright-report/
+
+# Python のバイトコード（誤ってコミットされていた）
+__pycache__/
+*.pyc

@@ -28,10 +28,11 @@
   },
   "profiles": {
     "permissive": {
-      "_comment": "商用利用に制約のないモデルのみ。",
+      "_comment": "商用利用に制約のないモデルのみ。mattePersonGate は「どこが被写体か」を決める門で、輪郭は mattePerson が出す。",
       "depth": "depth-anything-v3-small",
       "depthFallback": "depth-anything-v2-small",
       "mattePerson": "modnet",
+      "mattePersonGate": "u2netp",
       "matteObject": "isnet-general",
       "inpaint": "mi-gan"
     },
@@ -40,6 +41,7 @@
       "depth": "depth-anything-v3-small",
       "depthFallback": "depth-anything-v2-small",
       "mattePerson": "modnet",
+      "mattePersonGate": "u2netp",
       "matteObject": "rmbg-1.4",
       "inpaint": "mi-gan"
     }
@@ -174,6 +176,41 @@
       "notes": [
         "人物特化で軽く速い（約0.35s）。髪の抜けは弱いので高品質プリセットでは ISNet に切り替える。",
         "畳み込み中心なので q4f16 の恩恵が無い。両バックエンドとも uint8（決定 D22）。"
+      ]
+    },
+    "u2netp": {
+      "role": "matte",
+      "subject": "person",
+      "title": "U²-Net-p（領域の門）",
+      "url": "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2netp.onnx",
+      "sha256": "309c8469258dda742793dce0ebea8e6dd393174f89934733ecc8b14c76f4ddd8",
+      "upstream": "xuebinqin/U-2-Net",
+      "license": "Apache-2.0",
+      "commercialUse": true,
+      "inputSize": [
+        320,
+        320
+      ],
+      "preprocess": "imagenet",
+      "quantization": {
+        "mode": "fp16",
+        "byBackend": {
+          "webgpu": "fp16",
+          "wasm": "fp16"
+        }
+      },
+      "expectedBytes": 2400000,
+      "sizeTolerance": 0.25,
+      "notes": [
+        "MODNet だけだと、床に座る人物で敷物を被写体に含めてしまう（実写で α=254、",
+        "モデル全体の 28% が敷物になった）。MODNet は肖像マッティング用で、この構図が",
+        "分布外である。u2netp は同じ写真で敷物を α=0 と正しく除く。",
+        "使い方は『領域の門』。どこが被写体かは u2netp が決め、輪郭の細かさは MODNet が",
+        "出す。u2netp 単体だと 320² なので輪郭が粗い（頭部の輪郭長 54,461 対 67,226）。",
+        "uint8 量子化は使えない。出力が飽和して全画素が被写体になる（実測）。fp16 は",
+        "fp32 と同じ結果で 2.26 MB に収まるので、両バックエンドとも fp16 にする。",
+        "重みは U²-Net（Apache-2.0）。配布は rembg（MIT）の GitHub リリース。",
+        "HF に同じファイル（SHA256 一致）があるが、そちらはライセンス表記が無いので使わない。"
       ]
     },
     "isnet-general": {

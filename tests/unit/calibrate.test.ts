@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 import {
   calibrate,
   enhanceRelief,
+  flattenImplausibleBands,
   estimateNormals,
   solveAffine,
   pullBoundaryDepthInward,
@@ -572,5 +573,104 @@ describe('局所強調は帯域を絞る（v2.3、実写で判明）', () => {
   it('boost が 1 なら何もしない', () => {
     const { z, alpha } = scene(0.02, 0.004);
     expect(enhanceRelief(z, alpha, W, W, RADIUS, 1)).toBe(z);
+  });
+});
+
+describe('人体としてあり得ない帯を潰す（v2.5）', () => {
+  const W = 64;
+  const H = 80;
+  const FOCAL = 100;
+
+  /**
+   * 上が細い胴（幅 12px）、下が広い脚（幅 48px）。胴だけが深い。
+   * 全体で見ると脚が幅を決めるので、比は人体としてあり得る値に収まる。
+   */
+  function seated(torsoAmp: number, legAmp: number) {
+    const z = new Float32Array(W * H);
+    const alpha = new Uint8ClampedArray(W * H);
+    const put = (x: number, y: number, v: number): void => {
+      alpha[y * W + x] = 255;
+      z[y * W + x] = v;
+    };
+    for (let y = 10; y < 40; y++) {
+      for (let x = 26; x < 38; x++) put(x, y, 1 + torsoAmp * Math.cos(((x - 26) / 11) * Math.PI));
+    }
+    for (let y = 40; y < 70; y++) {
+      for (let x = 8; x < 56; x++) put(x, y, 1 + legAmp * Math.cos(((x - 8) / 47) * Math.PI));
+    }
+    return { z, alpha };
+  }
+
+  /** 行 y0..y1 の 奥行き ÷ 幅（実寸）。 */
+  function ratio(z: Float32Array, alpha: Uint8ClampedArray, y0: number, y1: number): number {
+    const zs: number[] = [];
+    let xlo = W;
+    let xhi = -1;
+    for (let y = y0; y < y1; y++) {
+      for (let x = 0; x < W; x++) {
+        const i = y * W + x;
+        if ((alpha[i] as number) < 128) continue;
+        zs.push(z[i] as number);
+        if (x < xlo) xlo = x;
+        if (x > xhi) xhi = x;
+      }
+    }
+    if (xhi < xlo) return 0;
+    zs.sort((a, b) => a - b);
+    const q = (f: number): number => zs[Math.floor(f * (zs.length - 1))] as number;
+    return (q(0.98) - q(0.02)) / (((xhi - xlo + 1) / FOCAL) * 1.0);
+  }
+
+  it('深すぎる帯だけを上限まで潰す', () => {
+    const { z, alpha } = seated(0.2, 0.05);
+    expect(ratio(z, alpha, 10, 40), '前提: 胴は深すぎる').toBeGreaterThan(2);
+
+    const out = flattenImplausibleBands(z, alpha, W, H, FOCAL, 0.7);
+    const torso = ratio(out, alpha, 10, 40);
+    expect(torso, `胴 ${torso.toFixed(2)}`).toBeLessThan(0.9);
+  });
+
+  it('もともと浅い帯には触らない', () => {
+    const { z, alpha } = seated(0.2, 0.05);
+    const before = ratio(z, alpha, 40, 70);
+    const after = ratio(flattenImplausibleBands(z, alpha, W, H, FOCAL, 0.7), alpha, 40, 70);
+    expect(after, `脚 ${before.toFixed(2)} → ${after.toFixed(2)}`).toBeCloseTo(before, 2);
+  });
+
+  it('胴と脚の境目でも、境目に接する帯が素通りしない', () => {
+    // 帯の幅を「帯の外接幅」で取ると、境目の帯は脚の幅で胴の奥行きを割って
+    // しまい、比が小さく出て素通りする。分母を行ごとの幅にした理由。
+    const { z, alpha } = seated(0.2, 0.05);
+    const out = flattenImplausibleBands(z, alpha, W, H, FOCAL, 0.7);
+    const lower = ratio(out, alpha, 30, 40); // 胴のうち脚に接する側
+    expect(lower, `胴の下端 ${lower.toFixed(2)}`).toBeLessThan(0.9);
+  });
+
+  it('どの帯も上限内なら、同じ配列をそのまま返す', () => {
+    const { z, alpha } = seated(0.02, 0.02);
+    expect(flattenImplausibleBands(z, alpha, W, H, FOCAL, 0.7)).toBe(z);
+  });
+
+  it('被写体が無ければ何もしない', () => {
+    const z = new Float32Array(W * H).fill(1);
+    const alpha = new Uint8ClampedArray(W * H);
+    expect(flattenImplausibleBands(z, alpha, W, H, FOCAL, 0.7)).toBe(z);
+  });
+
+  it('帯どうしの前後関係は保たれる（体が分断されない）', () => {
+    // 胴を手前、脚を奥に置く。潰した後も胴が手前のままであること。
+    const { z, alpha } = seated(0.2, 0.05);
+    for (let y = 10; y < 40; y++) for (let x = 26; x < 38; x++) z[y * W + x]! += 0.3;
+
+    const med = (a: Float32Array, y0: number, y1: number): number => {
+      const v: number[] = [];
+      for (let y = y0; y < y1; y++) {
+        for (let x = 0; x < W; x++) if ((alpha[y * W + x] as number) >= 128) v.push(a[y * W + x] as number);
+      }
+      v.sort((p, q) => p - q);
+      return v[v.length >> 1] as number;
+    };
+    const out = flattenImplausibleBands(z, alpha, W, H, FOCAL, 0.7);
+    expect(med(out, 10, 40) - med(out, 40, 70)).toBeGreaterThan(0.25);
   });
 });

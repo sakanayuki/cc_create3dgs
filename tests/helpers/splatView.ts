@@ -76,6 +76,49 @@ export function depthToWidth(data: Uint8Array, count: number): number {
   return w > 1e-9 ? d / w : 0;
 }
 
+/**
+ * 高さ方向の帯ごとの 奥行き ÷ 幅。上（頭）から下（脚）の順に返す。
+ *
+ * 全体でひとつの比を見るだけでは足りない。座った人物は伸ばした脚で幅が
+ * 決まるので、**全体の比が正しくても胴だけが 8 倍深い**という壊れ方が
+ * 通ってしまう（実写での実測: 全体 0.81 対 理想 0.76 なのに、胸だけ
+ * 1.18 対 0.14）。斜め 35° から見ると胴が横に裂ける。
+ *
+ * 帯は被写体の y 範囲（p1..p99）を等分して取る。各帯の点が少なすぎる
+ * ときは NaN を返す。
+ */
+export function depthToWidthBands(data: Uint8Array, count: number, bands = 4): number[] {
+  const { x, y, z } = decodeSplats(data, count);
+  const q = (a: ArrayLike<number>, f: number): number => {
+    const s = Array.from(a).sort((p, r) => p - r);
+    return s[Math.floor(f * (s.length - 1))] as number;
+  };
+  const lo = q(y, 0.01);
+  const hi = q(y, 0.99);
+  const step = (hi - lo) / bands;
+  const out: number[] = [];
+  for (let b = bands - 1; b >= 0; b--) {
+    const y0 = lo + b * step;
+    const y1 = b === bands - 1 ? Infinity : lo + (b + 1) * step;
+    const xs: number[] = [];
+    const zs: number[] = [];
+    for (let i = 0; i < count; i++) {
+      const yy = y[i] as number;
+      if (yy < y0 || yy >= y1) continue;
+      xs.push(x[i] as number);
+      zs.push(z[i] as number);
+    }
+    if (xs.length < 64) {
+      out.push(NaN);
+      continue;
+    }
+    const w = q(xs, 0.98) - q(xs, 0.02);
+    const d = q(zs, 0.98) - q(zs, 0.02);
+    out.push(w > 1e-9 ? d / w : 0);
+  }
+  return out;
+}
+
 /** 指定した角度から描いて、被覆マスクを返す。 */
 export function renderCoverage(
   data: Uint8Array,

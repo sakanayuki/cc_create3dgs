@@ -392,6 +392,63 @@ export const DEFAULT_MATTE_PARAMS: MatteRefineParams = {
 };
 
 /**
+ * 「領域の門」でマットを絞る（docs/03 §3.3.1、v2.5）。
+ *
+ * `fine` の輪郭の細かさを保ったまま、`gate` が被写体と認めない場所を落とす。
+ * 門は少しだけ膨らませる。輪郭を出すモデルのほうがわずかに外側までシルエットを
+ * 取るので、そのぶんを削らないため。
+ *
+ * 実写では、床に座る人物で MODNet が敷物を α=254 で被写体に含めていた
+ * （モデル全体の 28%）。u2netp を門にすると敷物が消え、輪郭の細かさは
+ * MODNet のまま残る。
+ *
+ * @param dilate 門を広げる画素数。0 なら門そのまま。
+ */
+export function applyMatteGate(
+  fine: ArrayLike<number>,
+  gate: ArrayLike<number>,
+  width: number,
+  height: number,
+  dilate = 4,
+  threshold = 128,
+): Uint8ClampedArray {
+  const open = new Uint8Array(width * height);
+  for (let i = 0; i < open.length; i++) open[i] = (gate[i] as number) >= threshold ? 1 : 0;
+
+  const grown = dilate > 0 ? dilateMask(open, width, height, dilate) : open;
+  const out = new Uint8ClampedArray(width * height);
+  for (let i = 0; i < out.length; i++) out[i] = grown[i] ? (fine[i] as number) : 0;
+  return out;
+}
+
+/** 二値マスクを r 画素ぶん膨らませる（分離可能な最大値フィルタ）。 */
+function dilateMask(mask: Uint8Array, width: number, height: number, r: number): Uint8Array {
+  const tmp = new Uint8Array(width * height);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let v = 0;
+      for (let k = -r; k <= r && !v; k++) {
+        const nx = x + k;
+        if (nx >= 0 && nx < width && mask[y * width + nx]) v = 1;
+      }
+      tmp[y * width + x] = v;
+    }
+  }
+  const out = new Uint8Array(width * height);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let v = 0;
+      for (let k = -r; k <= r && !v; k++) {
+        const ny = y + k;
+        if (ny >= 0 && ny < height && tmp[ny * width + x]) v = 1;
+      }
+      out[y * width + x] = v;
+    }
+  }
+  return out;
+}
+
+/**
  * docs/03 §3.3 の後処理を順に適用する。
  *
  * 順序に意味がある。ガイデッドフィルタを先にかけるのは、境界を写真の輪郭に

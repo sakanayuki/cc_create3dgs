@@ -13,7 +13,7 @@ import { estimateNormals, calibrate, pullBoundaryDepthInward } from './3-calibra
 import { thicknessMap } from './4-shell';
 import { buildSplats, DEFAULT_BUILD_PARAMS, type BuildParams, type SplatBuild } from './6-splats';
 import { adaptiveSample, solveSamplingParams, samplingReduction } from './7-sample';
-import { refineMatte } from './1-matte';
+import { applyMatteGate, refineMatte } from './1-matte';
 import {
   depthTiles,
   expandToSquare,
@@ -198,12 +198,53 @@ function pickOutput(
   return t as ort.Tensor;
 }
 
+/** マットモデルを1つ動かして、作業グリッドの 0..255 マットにする。 */
+async function inferMatte(
+  session: ort.InferenceSession,
+  rgba: Uint8ClampedArray,
+  grid: number,
+  size: number,
+  norm: { mean: readonly [number, number, number]; std: readonly [number, number, number] },
+): Promise<Uint8ClampedArray> {
+  const small = resizeRgba(rgba, grid, grid, size, size);
+  const input = toTensorNCHW(small, size, size, norm);
+  const dims = inputDims(declaredRank(session), 3, size, size);
+  const out = await session.run(feedOf(session, new ort.Tensor('float32', input, dims)));
+  const t = pickOutput(out, session, 'matte', 'alpha', 'output');
+  const raw = t.data as unknown as Float32Array;
+
+  // 出力の空間サイズはモデル次第。要素数から一辺を割り出す。
+  const side = Math.round(Math.sqrt(raw.length));
+  // u2netp は符号なしの生スコアを返すので、最小最大で 0..1 に伸ばす。
+  // MODNet は既に [0,1] なので、この正規化を通しても値は変わらない。
+  const [lo, hi] = minMax(raw);
+  const span = Math.max(hi - lo, 1e-9);
+  const unit = new Float32Array(raw.length);
+  for (let i = 0; i < raw.length; i++) {
+    unit[i] = Math.max(0, Math.min(1, ((raw[i] as number) - lo) / span));
+  }
+
+  const full = resizePlane(unit, side, side, grid, grid);
+  const alpha = new Uint8ClampedArray(grid * grid);
+  for (let i = 0; i < alpha.length; i++) alpha[i] = Math.round((full[i] as number) * 255);
+  return alpha;
+}
+
 /**
  * ① 被写体抽出。
  *
- * 人物は MODNet、物体は ISNet。どちらも入力は正方の RGB で、出力は
- * 1チャンネルのマット。値域はモデルによって [0,1] だったり広かったりするので、
- * 最大値で正規化してから 0..255 にする。
+ * 人物は「u2netp が領域を決め、MODNet が輪郭を出す」二段（v2.5、実写で判明）。
+ *
+ * MODNet だけだと、床に座る人物で敷物を被写体に含めてしまう。実写では敷物を
+ * α=254（確信度いっぱい）で被写体と判定し、モデル全体の 28% が敷物になった。
+ * 閾値の問題ではない。MODNet は肖像マッティング用で、この構図が分布外である。
+ * u2netp は同じ写真で敷物を α=0 と正しく除く。
+ *
+ * 逆に u2netp は 320² なので輪郭が粗い（頭部の輪郭長 54,461 対 MODNet 67,226）。
+ * そこで領域は u2netp、輪郭は MODNet と役割を分ける。u2netp を少しだけ膨らませて
+ * 門にするのは、MODNet のほうがわずかに外側までシルエットを取るため。
+ *
+ * 物体モードは ISNet 単体（もともと領域を正しく取る）。
  */
 async function runMatte(
   rgba: Uint8ClampedArray,
@@ -212,40 +253,42 @@ async function runMatte(
   backend: Backend,
   shaderF16: boolean,
 ): Promise<Uint8ClampedArray> {
-  const size = mode === 'person' ? 512 : 1024;
-  const session =
-    mode === 'person'
-      ? await loadModel(
-          'modnet',
-          backend,
-          { repo: 'Xenova/modnet', file: 'onnx/model_uint8.onnx' },
-          shaderF16,
-        )
-      : await loadModel(
-          'isnet-general',
-          backend,
-          { repo: 'imgly/isnet-general-onnx', file: 'onnx/model.onnx' },
-          shaderF16,
-        );
+  if (mode !== 'person') {
+    const session = await loadModel(
+      'isnet-general',
+      backend,
+      { repo: 'imgly/isnet-general-onnx', file: 'onnx/model.onnx' },
+      shaderF16,
+    );
+    return inferMatte(session, rgba, grid, 1024, { mean: [0.5, 0.5, 0.5], std: [0.5, 0.5, 0.5] });
+  }
 
-  const small = resizeRgba(rgba, grid, grid, size, size);
-  const input = toTensorNCHW(small, size, size, { mean: [0.5, 0.5, 0.5], std: [0.5, 0.5, 0.5] });
-  const dims = inputDims(declaredRank(session), 3, size, size);
-  const out = await session.run(feedOf(session, new ort.Tensor('float32', input, dims)));
-  const t = pickOutput(out, session, 'matte', 'alpha', 'output');
-  const raw = t.data as unknown as Float32Array;
+  const modnet = await loadModel(
+    'modnet',
+    backend,
+    { repo: 'Xenova/modnet', file: 'onnx/model_uint8.onnx' },
+    shaderF16,
+  );
+  const fine = await inferMatte(modnet, rgba, grid, 512, {
+    mean: [0.5, 0.5, 0.5],
+    std: [0.5, 0.5, 0.5],
+  });
 
-  // 出力の空間サイズはモデル次第。要素数から一辺を割り出す。
-  const side = Math.round(Math.sqrt(raw.length));
-  const [, hi] = minMax(raw);
-  const norm = new Float32Array(raw.length);
-  const k = hi > 1.5 ? 1 / hi : 1; // 0..255 で返すモデルもある
-  for (let i = 0; i < raw.length; i++) norm[i] = Math.max(0, Math.min(1, (raw[i] as number) * k));
-
-  const full = resizePlane(norm, side, side, grid, grid);
-  const alpha = new Uint8ClampedArray(grid * grid);
-  for (let i = 0; i < alpha.length; i++) alpha[i] = Math.round((full[i] as number) * 255);
-  return alpha;
+  let gate: Uint8ClampedArray;
+  try {
+    const u2 = await loadModel(
+      'u2netp',
+      backend,
+      { repo: 'tomjackson2023/rembg', file: 'u2netp.onnx' },
+      shaderF16,
+    );
+    // u2netp は ImageNet 正規化で学習されている。
+    gate = await inferMatte(u2, rgba, grid, 320, { mean: IMAGENET_MEAN, std: IMAGENET_STD });
+  } catch {
+    // 門が取れなければ MODNet 単体に落ちる。敷物は残るが、生成は止めない。
+    return fine;
+  }
+  return applyMatteGate(fine, gate, grid, grid);
 }
 
 export interface DepthOutput {

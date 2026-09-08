@@ -11,11 +11,16 @@
  * ここでは合成の被写体でその仕組みを再現し、指標で捕まえる。
  */
 import { describe, expect, it } from 'vitest';
-import { estimateNormals, pullBoundaryDepthInward } from '../../src/pipeline/3-calibrate';
+import { calibrate, estimateNormals, pullBoundaryDepthInward } from '../../src/pipeline/3-calibrate';
 import { thicknessMap } from '../../src/pipeline/4-shell';
 import { buildSplats, DEFAULT_BUILD_PARAMS } from '../../src/pipeline/6-splats';
 import { adaptiveSample, SAMPLING_PRESETS } from '../../src/pipeline/7-sample';
-import { decodeSplats, depthToWidth, viewMetrics } from '../helpers/splatView';
+import {
+  decodeSplats,
+  depthToWidth,
+  depthToWidthBands,
+  viewMetrics,
+} from '../helpers/splatView';
 
 const S = 160;
 const FOCAL = 200;
@@ -103,6 +108,76 @@ function capsuleArgs(
   c: ReturnType<typeof capsule>,
 ): [Float32Array, Uint8ClampedArray, Uint8ClampedArray] {
   return [c.depth, c.color, c.alpha];
+}
+
+/**
+ * 座った人物を模した被写体。**全体の比は正しいのに胴だけが深い**。
+ *
+ * 実写（他実装との比較）で見つかった壊れ方をそのまま合成する。伸ばした脚が
+ * 幅を決めるので、全体の 奥行き ÷ 幅 は人体としてあり得る値に収まる。その
+ * 陰で胴だけが幅の 2.7 倍の奥行きを持つ。
+ */
+function seated() {
+  const depth = new Float32Array(S * S);
+  const color = new Uint8ClampedArray(S * S * 4);
+  const alpha = new Uint8ClampedArray(S * S);
+  const put = (x: number, y: number, z: number): void => {
+    const i = y * S + x;
+    alpha[i] = 255;
+    depth[i] = z;
+    color[i * 4] = 200;
+    color[i * 4 + 1] = 170;
+    color[i * 4 + 2] = 150;
+    color[i * 4 + 3] = 255;
+  };
+  // 胴: 幅 30px、奥行き 0.40（比 2.7）
+  for (let y = 20; y < 80; y++) {
+    for (let x = 65; x < 95; x++) {
+      const t = (x - 65) / 29;
+      put(x, y, 1.0 + 0.20 * Math.cos(t * Math.PI));
+    }
+  }
+  // 脚: 幅 120px、奥行き 0.10（比 0.17）
+  for (let y = 80; y < 140; y++) {
+    for (let x = 20; x < 140; x++) {
+      const t = (x - 20) / 119;
+      put(x, y, 1.0 + 0.05 * Math.cos(t * Math.PI));
+    }
+  }
+  return { depth, color, alpha };
+}
+
+/** seated() の生深度を calibrate に通して splat まで作る。 */
+function buildCalibrated(bandMaxRatio: number) {
+  const { depth, color, alpha } = seated();
+  const cal = calibrate({
+    raw: depth,
+    width: S,
+    height: S,
+    alpha,
+    kind: 'depth',
+    focalPx: FOCAL,
+    bandMaxRatio,
+  });
+  const span = cal.farZ - cal.nearZ;
+  const d01 = new Float32Array(S * S);
+  const metric = new Float32Array(S * S);
+  for (let i = 0; i < d01.length; i++) {
+    d01[i] = (cal.depth[i] as number) / 65535;
+    metric[i] = cal.nearZ + (d01[i] as number) * span;
+  }
+  const normals = estimateNormals(metric, S, S, FOCAL, span * 0.05);
+  const cells = adaptiveSample(d01, color, alpha, S, S, SAMPLING_PRESETS.high);
+  const thickness = thicknessMap(alpha, S, S, { maxThickness: 0.12, profile: 'ellipsoid' });
+  const b = buildSplats(
+    { cells, normals, width: S, height: S, focalPx: FOCAL, nearZ: cal.nearZ, farZ: cal.farZ },
+    color,
+    alpha,
+    thickness,
+    null,
+    { ...DEFAULT_BUILD_PARAMS },
+  );
+  return { b, cal };
 }
 
 describe('斜めから見たときの健全性（v2.3、実写での破綻にもとづく）', () => {
@@ -223,5 +298,35 @@ describe('斜めから見たときの健全性（v2.3、実写での破綻にも
     for (let i = 0; i < u16.length; i++) u16[i] = Math.round((depth[i] as number) * 65535);
     const pulled = pullBoundaryDepthInward(u16, alpha, S, S, 6);
     for (let i = 0; i < u16.length; i++) expect(pulled[i]).toBe(u16[i]);
+  });
+});
+
+describe('部位ごとの奥行きの妥当性（v2.5、他実装との比較にもとづく）', () => {
+  it('全体の指標では、胴だけが深い壊れ方を見逃す', () => {
+    // 検査そのものの限界を書き留めておく。この写真で実際に起きたことで、
+    // 帯ごとの指標を足した理由でもある。
+    const { b } = buildCalibrated(99);
+    const whole = depthToWidth(b.data, b.count);
+    expect(whole, `全体の 奥行き ÷ 幅 = ${whole.toFixed(3)}`).toBeLessThan(1.0);
+
+    const bands = depthToWidthBands(b.data, b.count);
+    const torso = Math.max(bands[0] as number, bands[1] as number);
+    expect(torso, `胴の 奥行き ÷ 幅 = ${torso.toFixed(3)}`).toBeGreaterThan(1.3);
+  });
+
+  it('帯ごとに見ると、どの部位も人体としてあり得る奥行きに収まる', () => {
+    const { b } = buildCalibrated(0.7);
+    const bands = depthToWidthBands(b.data, b.count);
+    for (const [i, r] of bands.entries()) {
+      expect(r, `上から ${i + 1} 番目の帯の 奥行き ÷ 幅 = ${r.toFixed(3)}`).toBeLessThan(1.05);
+    }
+  });
+
+  it('潰すのは深すぎる帯だけで、もともと浅い帯には触らない', () => {
+    const off = depthToWidthBands(buildCalibrated(99).b.data, buildCalibrated(99).b.count);
+    const on = depthToWidthBands(buildCalibrated(0.7).b.data, buildCalibrated(0.7).b.count);
+    const legsOff = off[3] as number;
+    const legsOn = on[3] as number;
+    expect(legsOn, `脚 ${legsOff.toFixed(3)} → ${legsOn.toFixed(3)}`).toBeGreaterThan(legsOff * 0.8);
   });
 });

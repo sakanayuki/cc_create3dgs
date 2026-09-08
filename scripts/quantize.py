@@ -405,7 +405,8 @@ def build_one(
     # 公開済みの量子化版があれば流用する（CI 時間の節約。registry の prequantized）
     pre_rel = m.prequantized(mode)
     pre_path = (raw_dir / m.id / pre_rel) if pre_rel else None
-    src = raw_dir / m.id / m.raw["hf"]["file"]
+    # HF 取得と URL 取得でファイル名の決まり方が違うので、解決は Model に任せる。
+    src = m.raw_path(raw_dir)
 
     if not force and pre_path is not None and pre_path.exists():
         shutil.copyfile(pre_path, dst)
