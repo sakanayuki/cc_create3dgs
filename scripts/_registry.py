@@ -109,9 +109,21 @@ class Model:
 
     # --- 配置先 ---
     def raw_path(self, out: Path) -> Path:
+        """fetch_models.py が置いた元モデルの場所。
+
+        HF 側は `hf_hub_download(local_dir=...)` がリポジトリ内の相対パスを
+        そのまま再現するので、`onnx/model.onnx` は `onnx/` ごと残る。
+        ここでファイル名だけに詰めてはいけない（詰めたら DA3 と ISNet が
+        「元モデルが見つかりません」で落ちた。ディレクトリを持たない
+        mi-gan と、量子化済みを流用する modnet だけが通ってしまい、
+        気づきにくい壊れ方をする）。
+
+        URL 取得のモデルは `urlretrieve` で 1 ファイルを置くだけなので、
+        URL の末尾の名前になる。
+        """
         if self.url:
             return out / self.id / Path(self.url).name
-        return out / self.id / Path(self.raw["hf"]["file"]).name
+        return out / self.id / self.raw["hf"]["file"]
 
     def out_path(self, out: Path) -> Path:
         return out / f"{self.id}.{self.quant_mode}.onnx"

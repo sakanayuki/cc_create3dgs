@@ -173,6 +173,34 @@ def check_rank_handling(d: Path) -> bool:
     return ok
 
 
+def check_raw_paths() -> bool:
+    """registry の全モデルで、`raw_path` が fetch_models.py の置き場所と一致するか。
+
+    deploy #? で落ちた: `raw_path` が HF のファイル名だけを取っていて、
+    `onnx/model.onnx` の `onnx/` が消えていた。`hf_hub_download(local_dir=...)`
+    はリポジトリ内の相対パスをそのまま再現するので、実際は `onnx/` の下に
+    置かれる。DA3 と ISNet だけが「元モデルが見つかりません」で落ち、
+    ディレクトリを持たない mi-gan と、量子化済みを流用する modnet は
+    通ってしまうので、気づきにくい壊れ方をした。
+
+    ここは registry を読むだけで済む検査なので、本物のモデルは要らない。
+    """
+    from _registry import Registry
+
+    reg = Registry.load()
+    root = Path("/tmp/raw")
+    ok = True
+    for m in reg.models.values():
+        got = m.raw_path(root)
+        if m.url:
+            want = root / m.id / Path(m.url).name
+        else:
+            # fetch_models.py: hf_hub_download(filename=rel, local_dir=out/id)
+            want = root / m.id / m.raw["hf"]["file"]
+        ok &= check(f"raw_path {m.id}", got == want, "" if got == want else f"{got} ≠ {want}")
+    return ok
+
+
 def check(name: str, ok: bool, detail: str = "") -> bool:
     print(f"  {'OK  ' if ok else 'NG  '} {name}{(' — ' + detail) if detail else ''}")
     return ok
@@ -253,6 +281,7 @@ def main() -> int:
 
         passed &= check_rank_handling(d)
         passed &= check_multi_input(d)
+        passed &= check_raw_paths()
 
         # 壊れたファイルを見逃さないこと
         bad = d / "broken.onnx"
