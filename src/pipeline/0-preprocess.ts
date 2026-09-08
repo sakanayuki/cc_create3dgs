@@ -31,12 +31,20 @@ export interface Letterbox {
 /**
  * 長辺を `size` に合わせ、中央に置くレターボックスを求める。
  *
- * 拡大はしない。小さい写真を引き伸ばしても情報は増えず、
- * ガウシアン数だけが無駄に増える。
+ * **小さい写真は拡大する（v2.6.2、docs/09 §V14）。** v2.5 までは
+ * 「引き伸ばしても情報は増えず、ガウシアン数だけ無駄に増える」として
+ * 等倍で置いていた。これが誤りだった。**どのモデルも作業グリッド全体を
+ * 自分の入力寸法へ縮めて受け取る**ので、グリッドを埋めないと、その割合の
+ * ぶんだけモデルの中でさらに縮む。268×512 の写真では、MODNet（512²）が
+ * 人物を 134×256 で見ることになり、**胴が丸ごと欠けた**。
+ *
+ * ガウシアン数は拡大率ではなくグリッドの広さで頭打ちになる（被写体が
+ * グリッドを超えることはない）ので、拡大しても最悪値は変わらない。
+ * 密度を落としたいときは⑦の統合率で決める。そちらが設計の意図である。
  */
 export function letterbox(srcWidth: number, srcHeight: number, size = WORKING_GRID): Letterbox {
   if (srcWidth <= 0 || srcHeight <= 0) throw new Error('画像の大きさが不正です');
-  const scale = Math.min(1, size / Math.max(srcWidth, srcHeight));
+  const scale = size / Math.max(srcWidth, srcHeight);
   const width = Math.max(1, Math.round(srcWidth * scale));
   const height = Math.max(1, Math.round(srcHeight * scale));
   return {

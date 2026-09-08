@@ -29,12 +29,23 @@ describe('レターボックス', () => {
     expect(b.offsetY).toBe(0);
   });
 
-  it('小さい写真を引き伸ばさない', () => {
+  it('小さい写真はグリッドいっぱいまで拡大する', () => {
+    // モデルは作業グリッド全体を自分の入力寸法へ縮めるので、グリッドを
+    // 埋めないと被写体がモデルの中でさらに縮む（docs/09 §V14）。
     const b = letterbox(400, 300, 1024);
-    expect(b.scale).toBe(1);
-    expect(b.width).toBe(400);
-    expect(b.height).toBe(300);
-    expect(b.offsetX).toBe(312);
+    expect(b.scale).toBeCloseTo(2.56, 6);
+    expect(b.width).toBe(1024);
+    expect(b.height).toBe(768);
+    expect(b.offsetX).toBe(0);
+    expect(b.offsetY).toBe(128);
+  });
+
+  it('縦長の小さい写真も長辺がグリッドに合う', () => {
+    const b = letterbox(268, 512, 1024);
+    expect(b.height).toBe(1024);
+    expect(b.width).toBe(536);
+    expect(b.offsetY).toBe(0);
+    expect(b.offsetX).toBe(244);
   });
 
   it('グリッド座標から元の座標へ戻せる', () => {
