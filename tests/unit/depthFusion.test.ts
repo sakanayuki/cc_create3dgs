@@ -110,6 +110,41 @@ describe('2パス融合', () => {
     return { global, tile: { depth, rect } };
   }
 
+  it('尺度合わせに被写体の画素だけを使う（v2.3、実写で判明）', () => {
+    // 背景は「合わせられない」領域である。単眼深度は遠景に安定した値を
+    // 返さないので、切り出し方が違えば空やプールの深度は別物になる。
+    // 実写では、頭のタイルの 60% が背景で、その背景に引かれて倍率が
+    // 1.05 → 1.22 までずれ、被写体の深度が丸ごと押し出されていた。
+    const global = ramp();
+    const rect = { x: 8, y: 8, width: 48, height: 48 };
+    const depth = new Float32Array(rect.width * rect.height);
+    const alpha = new Uint8Array(S * S);
+    for (let y = 0; y < rect.height; y++) {
+      for (let x = 0; x < rect.width; x++) {
+        const gi = (rect.y + y) * S + (rect.x + x);
+        const g = global[gi] as number;
+        // 被写体は素直に 2 倍。背景はまったく無関係な値を返している。
+        const isSubject = x >= 16 && x < 32 && y >= 16 && y < 32;
+        if (isSubject) alpha[gi] = 255;
+        depth[y * rect.width + x] = isSubject ? g * 2 : 0.05 * (x + y);
+      }
+    }
+    const tile = { depth, rect };
+    const opts = { ...DEFAULT_FUSE_PARAMS, feather: 2 };
+
+    const withBg = fuseDepth(global, [tile], S, S, opts);
+    const subjectOnly = fuseDepth(global, [tile], S, S, { ...opts, subject: alpha });
+
+    // 被写体だけで合わせれば、正解の 1/2 が出る
+    expect(subjectOnly.fits[0]!.a).toBeCloseTo(0.5, 2);
+    // 背景こみだと正解から外れる
+    expect(Math.abs(withBg.fits[0]!.a - 0.5)).toBeGreaterThan(
+      Math.abs(subjectOnly.fits[0]!.a - 0.5),
+    );
+    // 残差も被写体だけのほうが小さい
+    expect(subjectOnly.fits[0]!.rmse).toBeLessThan(withBg.fits[0]!.rmse);
+  });
+
   it('タイルのスケールを全体に合わせる', () => {
     const { global, tile } = scenario();
     const { fits } = fuseDepth(global, [tile], S, S, { ...DEFAULT_FUSE_PARAMS, feather: 4 });

@@ -386,7 +386,29 @@ export function enhanceRelief(
   boost: number,
 ): Float32Array {
   if (boost <= 1 || radius < 1) return z;
-  const base = maskedBoxMean(z, alpha, width, height, Math.round(radius));
+
+  // 帯域を絞って持ち上げる。
+  //
+  // 素朴なアンシャープマスク（z − 大半径の平滑化）だと、**画素ごとの
+  // ノイズまで一緒に boost 倍される**。深度は 518² から 1024² へ引き伸ばして
+  // いるうえ、量子化と融合のむらも乗るので、最細部はほとんどノイズである。
+  // 実写で測ると、boost=3 は隣接画素の差（p90）を 0.024 → 0.046 と倍にし、
+  // その結果スカートの判定閾値（0.02）を普通の顔の傾斜が超えて、
+  // スカートが顔じゅうに林立した（全体の 21% → 48%）。
+  //
+  // そこで 3 つの帯に分ける。
+  //   ・大半径より粗い成分 = 大域の形    → そのまま（比率を保つ）
+  //   ・小半径〜大半径の帯 = 顔の凹凸    → boost 倍する
+  //   ・小半径より細かい成分 = ほぼノイズ → そのまま（増幅しない）
+  const outer = Math.max(1, Math.round(radius));
+  // 内側の半径には**絶対的な下限**を置く。ノイズは画素ごとに乗るので、
+  // その尺度は被写体の大きさに依らない。半径に比例させるだけだと、
+  // 被写体が小さいときに内側が 1〜2px になってノイズを均せず、
+  // 帯にノイズが残ったまま boost 倍されてしまう。
+  const inner = Math.min(outer, Math.max(3, Math.round(radius / 8)));
+  const base = maskedBoxMean(z, alpha, width, height, outer);
+  const fine = inner < outer ? maskedBoxMean(z, alpha, width, height, inner) : z;
+
   const out = new Float32Array(z.length);
   for (let i = 0; i < z.length; i++) {
     if ((alpha[i] as number) < SUBJECT_THRESHOLD) {
@@ -394,7 +416,8 @@ export function enhanceRelief(
       continue;
     }
     const b = base[i] as number;
-    out[i] = b + ((z[i] as number) - b) * boost;
+    const f = fine[i] as number;
+    out[i] = b + (f - b) * boost + ((z[i] as number) - f);
   }
   return out;
 }

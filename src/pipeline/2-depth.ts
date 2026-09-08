@@ -101,6 +101,19 @@ export interface FuseParams {
   /** 信頼度がこの値未満の画素はタイル側の重みを 0 にする。 */
   readonly minConfidence: number;
   /**
+   * 被写体マスク（α）。渡すと、タイルと全体パスの尺度合わせに
+   * **被写体の画素だけ**を使う。
+   *
+   * 渡さないと背景も混ざる。単眼深度は遠景に安定した値を返さないので、
+   * 切り出し方が違えば空やプールの深度は別物になる。実写で測ると、
+   * 頭のタイルは 60% が背景で、背景だけで合わせたときの残差は被写体の
+   * 5 倍あった。その背景に引かれて倍率が 1.05 → 1.22 までずれ、
+   * 被写体の深度が丸ごと押し出されていた。
+   */
+  readonly subject?: ArrayLike<number>;
+  /** 被写体とみなす α の下限。 */
+  readonly subjectThreshold?: number;
+  /**
    * 全体パスの重み。タイルは最大 1 なので、これを小さくするほど
    * タイルの細部が残る。0 にしてはいけない。タイルが1枚も掛からない
    * 領域（背景など）で分母が 0 になる。
@@ -193,7 +206,11 @@ export function fuseDepth(
         placed[gi] = v;
         weight[gi] = w;
         // フィットには羽根の内側だけを使う。端は信用しない。
-        overlap[gi] = w > 0.5 ? 1 : 0;
+        // 被写体マスクがあれば、さらに被写体の中だけに絞る。
+        const inSubject =
+          params.subject === undefined ||
+          (params.subject[gi] as number) >= (params.subjectThreshold ?? 128);
+        overlap[gi] = w > 0.5 && inSubject ? 1 : 0;
       }
     }
 

@@ -8,6 +8,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   calibrate,
+  enhanceRelief,
   estimateNormals,
   solveAffine,
   pullBoundaryDepthInward,
@@ -47,8 +48,11 @@ function sphereScene(z0 = 1.0, r = 0.28, size = SIZE, focal = FOCAL) {
   return { depth, alpha, size, focal, z0, r };
 }
 
-/** 局所強調（③）の平滑化半径。shortSide(=112px) × 0.04 を丸めた値。 */
-const RELIEF_BLUR_PX = 4;
+/**
+ * 局所強調（③）の平滑化半径。calibrate と同じ式で出す。
+ * 球の投影直径 = 2·r·focal（この場面では 51.5px）に 0.04 を掛けて丸める。
+ */
+const RELIEF_BLUR_PX = Math.max(1, Math.round(2 * 0.28 * FOCAL * 0.04));
 
 /**
  * 被写体マスクを k 画素だけ内側へ削り、「平滑化窓がマスクに切られない画素」を返す。
@@ -289,20 +293,22 @@ describe('較正（全体）', () => {
     const isInterior = eroded(alpha, size, size, RELIEF_BLUR_PX);
 
     let worstInside = 0;
-    const diffs: number[] = [];
+    let subjectPixels = 0;
+    let disagreeing = 0;
     for (let i = 0; i < depth.length; i++) {
       if ((alpha[i] as number) < 128) continue;
       const d = Math.abs((a.depth[i] as number) - (b.depth[i] as number)) / 65535;
-      diffs.push(d);
+      subjectPixels++;
+      if (d > 0.05) disagreeing++;
       if (isInterior[i]) worstInside = Math.max(worstInside, d);
     }
-    diffs.sort((p, q) => p - q);
-    const p99 = diffs[Math.floor(diffs.length * 0.99)] as number;
 
-    // 被写体の内部では、2 つの経路はほぼ完全に一致する（実測 0.0074）。
+    // 被写体の内部では、2 つの経路はほぼ一致する（実測 0.009）。
     expect(worstInside).toBeLessThan(0.02);
-    // 縁を含めても、ずれるのは 1% 未満の画素だけ（実測 p99 = 0.083）。
-    expect(p99).toBeLessThan(0.09);
+    // ずれるのは縁の画素だけ（実測 8.7%）。この球は投影直径が 51px しか
+    // 無いので、縁の帯が占める割合そのものが大きい。分位で見ると、この
+    // 付近は分布が急で添字 1 つで値が跳ねるため、割合で見る。
+    expect(disagreeing / subjectPixels).toBeLessThan(0.12);
   });
 
   it('被写体が無ければ理由を添えて止まる', () => {
@@ -438,5 +444,79 @@ describe('実寸と局所起伏（v2.2、実写での測定にもとづく）', 
     }
     const r = calibrate({ raw, width: S, height: S, alpha, kind: 'depth', focalPx: FOCAL });
     expect(r.depthToHeight).toBeLessThanOrEqual(0.95);
+  });
+});
+
+describe('局所強調は帯域を絞る（v2.3、実写で判明）', () => {
+  const W = 96;
+
+  /** 起伏だけ／ノイズだけの場面を作り分ける。 */
+  function scene(reliefAmp: number, noiseAmp: number) {
+    const z = new Float32Array(W * W);
+    const alpha = new Uint8ClampedArray(W * W);
+    let seed = 12345;
+    const rnd = (): number => {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      return seed / 0x7fffffff - 0.5;
+    };
+    for (let y = 0; y < W; y++) {
+      for (let x = 0; x < W; x++) {
+        const i = y * W + x;
+        alpha[i] = 255;
+        // 波長 24px の起伏＝顔の凹凸に相当する「持ち上げたい帯」
+        z[i] =
+          1 +
+          reliefAmp * Math.sin((x / 24) * Math.PI * 2) * Math.cos((y / 24) * Math.PI * 2) +
+          noiseAmp * rnd();
+      }
+    }
+    return { z, alpha };
+  }
+
+  /** 内側だけの標準偏差。縁は箱平均が切られるので外す。 */
+  function energy(z: ArrayLike<number>): number {
+    let s = 0;
+    let ss = 0;
+    let n = 0;
+    for (let y = 30; y < W - 30; y++) {
+      for (let x = 30; x < W - 30; x++) {
+        const v = z[y * W + x] as number;
+        s += v;
+        ss += v * v;
+        n++;
+      }
+    }
+    return Math.sqrt(ss / n - (s / n) ** 2);
+  }
+
+  const RADIUS = 24;
+  const BOOST = 3;
+
+  it('起伏の帯はおよそ boost 倍される', () => {
+    const { z, alpha } = scene(0.02, 0);
+    const gain = energy(enhanceRelief(z, alpha, W, W, RADIUS, BOOST)) / energy(z);
+    expect(gain).toBeGreaterThan(BOOST * 0.7);
+  });
+
+  it('画素ごとのノイズはほとんど増えない', () => {
+    // ここが素朴なアンシャープマスク（z − 平滑化）との違い。ノイズまで
+    // boost 倍すると、スカートの判定（深度の段差）が誤爆して顔じゅうに
+    // 帯が林立する。実写では全スプラットの 63% がスカートになった。
+    const { z, alpha } = scene(0, 0.02);
+    const gain = energy(enhanceRelief(z, alpha, W, W, RADIUS, BOOST)) / energy(z);
+    expect(gain).toBeLessThan(1.6);
+  });
+
+  it('起伏のほうがノイズより桁違いに強く持ち上がる', () => {
+    const r = scene(0.02, 0);
+    const n = scene(0, 0.02);
+    const gr = energy(enhanceRelief(r.z, r.alpha, W, W, RADIUS, BOOST)) / energy(r.z);
+    const gn = energy(enhanceRelief(n.z, n.alpha, W, W, RADIUS, BOOST)) / energy(n.z);
+    expect(gr / gn).toBeGreaterThan(2);
+  });
+
+  it('boost が 1 なら何もしない', () => {
+    const { z, alpha } = scene(0.02, 0.004);
+    expect(enhanceRelief(z, alpha, W, W, RADIUS, 1)).toBe(z);
   });
 });

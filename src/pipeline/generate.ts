@@ -399,6 +399,8 @@ async function runDepthTiles(
     feather: Math.max(8, Math.round(Math.min(bbox.width, bbox.height) * 0.08)),
     minConfidence: 0,
     globalWeight: 0.15,
+    // 尺度合わせは被写体の中だけで行う。背景を混ぜると倍率が壊れる。
+    subject: alpha,
   });
   return { depth: fused.depth, tiles: tiles.length };
 }

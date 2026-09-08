@@ -81,6 +81,14 @@ export interface BuildParams {
   readonly skirtStep: number;
   /** スカート1本あたりの最大枚数。長い帯が際限なく増えるのを防ぐ。 */
   readonly skirtMaxSteps: number;
+  /**
+   * 段差とみなす深度ギャップの分位（0〜1）。
+   *
+   * `skirtThreshold` の固定値と、この分位で決まる値の**大きいほう**を使う。
+   * 較正の仕方で深度の勾配の大きさは変わるので、固定値だけだと枚数が
+   * 桁で動く（実写で 21% → 63% になった）。
+   */
+  readonly skirtGapPercentile: number;
 }
 
 export const DEFAULT_BUILD_PARAMS: BuildParams = {
@@ -97,6 +105,7 @@ export const DEFAULT_BUILD_PARAMS: BuildParams = {
   skirtStepRatio: 3,
   skirtStep: 1.5,
   skirtMaxSteps: 12,
+  skirtGapPercentile: 0.98,
 };
 
 export interface Normalization {
@@ -298,7 +307,44 @@ export function buildSplats(
   // 色は本来 ⑧ のインペイント結果から採るが、それが無い間は奥側の色を伸ばす
   // （v1 方式）。プレビューはこの色で出し、インペイント完了後に差し替える。
   if (params.skirt) {
-    const gapLimit = params.skirtThreshold;
+    // 閾値は深度マップ自身の分布から決める（v2.3、実写で判明）。
+    //
+    // 固定値（0.02）は、較正の仕方が変わると意味が変わってしまう。実写で
+    // 測ると、隣接画素の差の p90 がちょうど 0.02 前後にあり、**普通の顔の
+    // 傾斜がそのまま「不連続」と判定されて**スカートが顔じゅうに林立した
+    // （全スプラットの 63% がスカートになり、顔に縦の帯が走った）。
+    //
+    // 段差かどうかは本来「まわりに比べて跳ねているか」で決まる。下の
+    // skirtStepRatio がその判定で、こちらは「小さすぎる段差を捨てる床」に
+    // 徹する。分布の上位だけを通せば、較正の仕方によらず枚数が暴れない。
+    const gapAt = (i: number): number => {
+      if ((alpha[i] as number) < SUBJECT_ALPHA) return -1;
+      const ci = cells.cellId[i] as number;
+      if (ci < 0) return -1;
+      const dHere = cells.depth[ci] as number;
+      let g = 0;
+      for (const j of [i - 1, i + 1, i - width, i + width]) {
+        if ((alpha[j] as number) < SUBJECT_ALPHA) continue;
+        const cj = cells.cellId[j] as number;
+        if (cj < 0) continue;
+        const d = (cells.depth[cj] as number) - dHere;
+        if (d > g) g = d;
+      }
+      return g;
+    };
+    const sample: number[] = [];
+    for (let y = 1; y < height - 1; y++) {
+      for (let x = 1; x < width - 1; x++) {
+        const g = gapAt(y * width + x);
+        if (g >= 0) sample.push(g);
+      }
+    }
+    let adaptive = params.skirtThreshold;
+    if (sample.length >= 64) {
+      sample.sort((a, b) => a - b);
+      adaptive = sample[Math.floor(sample.length * params.skirtGapPercentile)] as number;
+    }
+    const gapLimit = Math.max(params.skirtThreshold, adaptive);
     for (let y = 1; y < height - 1; y++) {
       for (let x = 1; x < width - 1; x++) {
         const i = y * width + x;

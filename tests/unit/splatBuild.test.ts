@@ -321,3 +321,99 @@ describe('スカート（docs/03 §3.6.3）', () => {
     expect(r.skirtCount).toBe(0);
   });
 });
+
+describe('スカートの閾値は深度の分布から決める（v2.3、実写で判明）', () => {
+  /**
+   * なだらかな起伏だけの面。段差はどこにも無い。
+   *
+   * `amplitude` を上げると、較正の仕方で深度の勾配が大きくなった状況に
+   * なる。固定閾値（0.02）だと、ここで「不連続」の判定が誤爆し、
+   * 面じゅうにスカートが立ってしまう。実写では全スプラットの 63% が
+   * スカートになり、顔に縦の帯が走った。
+   */
+  function bumpy(amplitude: number) {
+    const depth = new Float32Array(S * S);
+    const color = new Uint8ClampedArray(S * S * 4);
+    const alpha = new Uint8ClampedArray(S * S);
+    for (let y = 6; y < S - 6; y++) {
+      for (let x = 6; x < S - 6; x++) {
+        const i = y * S + x;
+        alpha[i] = 255;
+        depth[i] =
+          0.5 + amplitude * Math.sin((x / 5) * Math.PI * 2) * Math.cos((y / 5) * Math.PI * 2);
+        color[i * 4] = 150;
+        color[i * 4 + 1] = 150;
+        color[i * 4 + 2] = 150;
+        color[i * 4 + 3] = 255;
+      }
+    }
+    return { depth, color, alpha };
+  }
+
+  function build(depth: Float32Array, color: Uint8ClampedArray, alpha: Uint8ClampedArray) {
+    const metric = new Float32Array(S * S);
+    for (let i = 0; i < metric.length; i++) metric[i] = NEAR + (depth[i] as number) * (FAR - NEAR);
+    const normals = estimateNormals(metric, S, S, FOCAL, 0.05);
+    const cells = adaptiveSample(depth, color, alpha, S, S, SAMPLING_PRESETS.high);
+    return buildSplats(
+      { cells, normals, width: S, height: S, focalPx: FOCAL, nearZ: NEAR, farZ: FAR },
+      color,
+      alpha,
+      null,
+      null,
+      { ...DEFAULT_BUILD_PARAMS, backShell: false },
+    );
+  }
+
+  it('勾配が大きくなってもスカートが暴走しない', () => {
+    // 振幅を 4 倍にしても、スカートの割合は数倍以内に収まること。
+    // 固定閾値のときは 21% → 63% と桁で動いていた。
+    const small = bumpy(0.02);
+    const large = bumpy(0.08);
+    const rs = build(small.depth, small.color, small.alpha);
+    const rl = build(large.depth, large.color, large.alpha);
+    const ratio = (r: { skirtCount: number; count: number }): number => r.skirtCount / r.count;
+    expect(ratio(rl)).toBeLessThan(0.25);
+    expect(ratio(rl)).toBeLessThan(Math.max(ratio(rs), 0.02) * 6);
+  });
+
+  it('分位を上げるほどスカートは減る', () => {
+    const { depth, color, alpha } = bumpy(0.06);
+    const metric = new Float32Array(S * S);
+    for (let i = 0; i < metric.length; i++) metric[i] = NEAR + (depth[i] as number) * (FAR - NEAR);
+    const normals = estimateNormals(metric, S, S, FOCAL, 0.05);
+    const cells = adaptiveSample(depth, color, alpha, S, S, SAMPLING_PRESETS.high);
+    const at = (p: number): number =>
+      buildSplats(
+        { cells, normals, width: S, height: S, focalPx: FOCAL, nearZ: NEAR, farZ: FAR },
+        color,
+        alpha,
+        null,
+        null,
+        { ...DEFAULT_BUILD_PARAMS, backShell: false, skirtGapPercentile: p },
+      ).skirtCount;
+    expect(at(0.99)).toBeLessThanOrEqual(at(0.9));
+  });
+
+  it('本当の段差なら分位を上げてもスカートは残る', () => {
+    // 段差が「上位数%の外れ値」として立っている場面なら、分位で切っても
+    // 残る。分位は小さすぎる段差を捨てる床であって、段差そのものの
+    // 判定は skirtStepRatio が受け持つ。
+    const depth = new Float32Array(S * S);
+    const color = new Uint8ClampedArray(S * S * 4);
+    const alpha = new Uint8ClampedArray(S * S);
+    for (let y = 8; y < S - 8; y++) {
+      for (let x = 8; x < S - 8; x++) {
+        const i = y * S + x;
+        alpha[i] = 255;
+        depth[i] = x < S / 2 ? 0.3 : 0.7;
+        const c = x < S / 2 ? 200 : 90;
+        color[i * 4] = c;
+        color[i * 4 + 1] = c;
+        color[i * 4 + 2] = c;
+        color[i * 4 + 3] = 255;
+      }
+    }
+    expect(build(depth, color, alpha).skirtCount).toBeGreaterThan(0);
+  });
+});
