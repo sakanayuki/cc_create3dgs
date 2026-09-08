@@ -21,6 +21,7 @@ import {
 } from './bench';
 import type { ThreadTestResponse } from './threadWorker';
 import { createRenderer } from '../render/createRenderer';
+import { Viewer } from '../ui/viewer';
 import { detectCapability, describeCapability, type Capability } from '../runtime/capability';
 import {
   disableCrossOriginIsolation,
@@ -509,7 +510,8 @@ declare global {
       createRenderer: typeof createRenderer;
       makeProceduralSplats: typeof makeProceduralSplats;
       buildPipelineSplats: typeof buildPipelineSplats;
+      Viewer: typeof Viewer;
     };
   }
 }
-window.__photosplat = { probePixels, createRenderer, makeProceduralSplats, buildPipelineSplats };
+window.__photosplat = { probePixels, createRenderer, makeProceduralSplats, buildPipelineSplats, Viewer };

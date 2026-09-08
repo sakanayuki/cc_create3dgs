@@ -35,6 +35,110 @@ export function rubberBand(value: number, comfort: number, hard: number): number
   return Math.sign(value) * (comfort + damped);
 }
 
+/** ドラッグの起点と、そのときの視点。 */
+export interface DragAnchor {
+  /** 起点の画面座標。 */
+  readonly x: number;
+  readonly y: number;
+  /** 起点を掴んだ瞬間の視点。 */
+  readonly yaw: number;
+  readonly pitch: number;
+}
+
+/**
+ * ドラッグの**起点からの**移動量を視点の角度に直す。
+ *
+ * 画面の幅いっぱいのドラッグで、快適範囲のちょうど 2 倍だけ回る。
+ */
+export function dragToView(
+  anchor: DragAnchor,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+): { yaw: number; pitch: number } {
+  const w = Math.max(1, width);
+  const h = Math.max(1, height);
+  return {
+    yaw: anchor.yaw - ((x - anchor.x) / w) * LIMITS.yawComfort * 4,
+    pitch: anchor.pitch - ((y - anchor.y) / h) * LIMITS.pitchComfort * 4,
+  };
+}
+
+/** ジェスチャが求めた視点。distance が undefined なら距離は据え置き。 */
+export interface GestureView {
+  readonly yaw: number;
+  readonly pitch: number;
+  readonly distance?: number;
+}
+
+/**
+ * 指（ポインタ）の出入りから視点を決める状態機械。
+ *
+ * DOM から切り離してあるのは、ここが一番間違えやすいからである。実際、
+ * 1 イベント分の差分を「掴んだ瞬間の角度」に足していて、どれだけ動かして
+ * も起点付近から離れず、**掴んでも回らなかった**。差分で積むなら基準の
+ * 角度も一緒に進めなければならない。起点からの絶対量で測るほうが素直で、
+ * 丸め誤差も溜まらない。
+ *
+ * 視点そのものは持たない。ラバーバンドを掛けたあとの値が真なので、
+ * 現在値は毎回呼び出し側から受け取る。
+ */
+export class GestureTracker {
+  private readonly pointers = new Map<number, { x: number; y: number }>();
+  private anchor: DragAnchor = { x: 0, y: 0, yaw: 0, pitch: 0 };
+  private startDistance = 1;
+  private pinchStart = 0;
+
+  get pointerCount(): number {
+    return this.pointers.size;
+  }
+
+  /** いまの指の位置と視点を新しい起点にする。 */
+  private reanchor(x: number, y: number, view: GestureView): void {
+    this.anchor = { x, y, yaw: view.yaw, pitch: view.pitch };
+  }
+
+  down(id: number, x: number, y: number, view: Required<GestureView>): void {
+    this.pointers.set(id, { x, y });
+    // 指が増えたときも起点を取り直す。そうしないと、2 本目を置いた瞬間に
+    // 1 本目との差だけ視点が飛ぶ。
+    this.reanchor(x, y, view);
+    this.startDistance = view.distance;
+    this.pinchStart = this.pointers.size === 2 ? pinchDistance(this.pointers) : 0;
+  }
+
+  /** 動かした結果の視点。掴んでいない指なら null。 */
+  move(
+    id: number,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    view: Required<GestureView>,
+  ): GestureView | null {
+    if (!this.pointers.has(id)) return null;
+    this.pointers.set(id, { x, y });
+
+    if (this.pointers.size >= 2) {
+      const d = pinchDistance(this.pointers);
+      if (this.pinchStart <= 0 || d <= 0) return null;
+      return { yaw: view.yaw, pitch: view.pitch, distance: this.startDistance * (this.pinchStart / d) };
+    }
+    return dragToView(this.anchor, x, y, width, height);
+  }
+
+  up(id: number, view: Required<GestureView>): void {
+    this.pointers.delete(id);
+    this.pinchStart = 0;
+    this.startDistance = view.distance;
+    // 指が 1 本残っているなら、その指を新しい起点にする。残った指の位置で
+    // 測り直さないと、離した瞬間に視点が飛ぶ。
+    const rest = this.pointers.values().next().value as { x: number; y: number } | undefined;
+    if (rest) this.reanchor(rest.x, rest.y, view);
+  }
+}
+
 export interface ViewerOptions {
   readonly canvas: HTMLCanvasElement;
   /** 生成完了時に短い往復アニメーションを入れるか（docs/06 §6.7）。 */
@@ -87,6 +191,11 @@ export class Viewer {
   }
 
   /** 視点を直接指定する。E2E で角度を変えて撮るのに使う。 */
+  /** いまの視点。E2E から操作の結果を確かめるのに使う。 */
+  getView(): ViewState {
+    return { ...this.view };
+  }
+
   setView(yaw: number, pitch = this.view.pitch, distance = this.view.distance): void {
     this.introUntil = 0;
     this.applyView(yaw, pitch, distance);
@@ -138,57 +247,40 @@ export class Viewer {
 
   private attachInput(): void {
     const el = this.canvas;
-    const pointers = new Map<number, { x: number; y: number }>();
-    let startYaw = 0;
-    let startPitch = 0;
-    let startDist = 1;
-    let pinchStart = 0;
+    const gestures = new GestureTracker();
 
     const stopIntro = (): void => {
       // 触れた瞬間に導入アニメーションは止める。勝手に動き続けるほうが不快。
       this.introUntil = 0;
     };
+    const now = (): Required<GestureView> => ({
+      yaw: this.view.yaw,
+      pitch: this.view.pitch,
+      distance: this.view.distance,
+    });
 
     const down = (e: PointerEvent): void => {
       el.setPointerCapture(e.pointerId);
-      pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-      startYaw = this.view.yaw;
-      startPitch = this.view.pitch;
-      startDist = this.view.distance;
-      if (pointers.size === 2) pinchStart = pinchDistance(pointers);
+      gestures.down(e.pointerId, e.clientX, e.clientY, now());
       stopIntro();
     };
 
     const move = (e: PointerEvent): void => {
-      const p = pointers.get(e.pointerId);
-      if (!p) return;
-      const first = pointers.values().next().value as { x: number; y: number };
-      pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-
-      if (pointers.size >= 2) {
-        const d = pinchDistance(pointers);
-        if (pinchStart > 0) this.applyView(this.view.yaw, this.view.pitch, startDist * (pinchStart / d));
-        return;
-      }
-      // 画面の幅いっぱいのドラッグで、快適範囲のちょうど2倍だけ回る。
-      const dx = e.clientX - (first?.x ?? e.clientX);
-      const dy = e.clientY - (first?.y ?? e.clientY);
-      const w = el.clientWidth || 1;
-      const h = el.clientHeight || 1;
-      this.applyView(
-        startYaw - (dx / w) * LIMITS.yawComfort * 4,
-        startPitch - (dy / h) * LIMITS.pitchComfort * 4,
-        this.view.distance,
+      const next = gestures.move(
+        e.pointerId,
+        e.clientX,
+        e.clientY,
+        el.clientWidth,
+        el.clientHeight,
+        now(),
       );
+      if (!next) return;
+      stopIntro();
+      this.applyView(next.yaw, next.pitch, next.distance ?? this.view.distance);
     };
 
     const up = (e: PointerEvent): void => {
-      pointers.delete(e.pointerId);
-      pinchStart = 0;
-      if (pointers.size === 0) {
-        startYaw = this.view.yaw;
-        startPitch = this.view.pitch;
-      }
+      gestures.up(e.pointerId, now());
     };
 
     const wheel = (e: WheelEvent): void => {
