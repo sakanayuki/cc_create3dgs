@@ -15,6 +15,13 @@ import { buildSplats, DEFAULT_BUILD_PARAMS, type BuildParams, type SplatBuild } 
 import { adaptiveSample, solveSamplingParams, samplingReduction } from './7-sample';
 import { applyMatteGate, refineMatte } from './1-matte';
 import {
+  applyFaceRelief,
+  boxFromLandmarks,
+  faceDepthSurface,
+  headBoxFromMatte,
+  type FaceLandmark,
+} from './geometry/faceSurface';
+import {
   depthTiles,
   expandToSquare,
   prepareImage,
@@ -109,6 +116,8 @@ export interface GenerateResult {
     readonly depthToWidth: number;
     /** 深度タイルパスで実際に使えたタイル数（0 なら全体パスのみ）。 */
     readonly depthTiles: number;
+    /** 顔の起伏を入れられたか（顔が写っていなければ false）。 */
+    readonly faceRelief: boolean;
     /** ⑧ で何を使ったか。mi-gan が本命、stretch は縮退、skipped は段差なし。 */
     readonly inpaint: 'mi-gan' | 'stretch' | 'skipped';
   };
@@ -289,6 +298,139 @@ async function runMatte(
     return fine;
   }
   return applyMatteGate(fine, gate, grid, grid);
+}
+
+/**
+ * 顔モデルの自己申告スコアの下限。
+ *
+ * 実測では、マットから当てた初期位置で 6.9、そこから切り直すと 17.6 だった。
+ * 顔が写っていない・横向きすぎる写真では大きく負に振れる。0 を境にすると
+ * 「たまたま顔に見えた何か」を拾うので、少し上に置く。
+ */
+const FACE_MIN_SCORE = 3;
+
+/** 顔の面がこの画素数に満たなければ使わない。小さすぎる顔は効果がない。 */
+const FACE_MIN_PIXELS = 1024;
+
+/**
+ * 切り直しの最大回数。
+ *
+ * 実測で 3 回目に乗った写真がある（床に座った人物: −7.5 → 2.5 → 14.6 → 19.2）。
+ * 1 回は 256² の 0.6M パラメータなので、数回まわしても無視できる。
+ */
+const FACE_MAX_PASSES = 4;
+
+/**
+ * 顔の 3D landmark を 1 回推論する（478 点、画像座標へ戻して返す）。
+ *
+ * モデルは 256² の正方入力で、x/y/z を同じ尺度（入力画素）で返す。
+ * z は頭の中心を原点にした相対値で、小さいほど手前。深度モデルと
+ * 向きが同じなので符号はそのまま使える。
+ */
+async function inferFaceLandmarks(
+  session: ort.InferenceSession,
+  rgba: Uint8ClampedArray,
+  grid: number,
+  box: Rect,
+): Promise<{ points: FaceLandmark[]; score: number }> {
+  const size = 256;
+  const patch = cropRgba(rgba, grid, box.x, box.y, box.width, box.height);
+  const small = resizeRgba(patch, box.width, box.height, size, size);
+
+  // このモデルは NHWC で 0..1 の RGB を取る（正規化はしない）。
+  const input = new Float32Array(size * size * 3);
+  for (let i = 0, j = 0; i < small.length; i += 4) {
+    input[j++] = (small[i] as number) / 255;
+    input[j++] = (small[i + 1] as number) / 255;
+    input[j++] = (small[i + 2] as number) / 255;
+  }
+  const feeds = feedOf(session, new ort.Tensor('float32', input, [1, size, size, 3]));
+  const out = await session.run(feeds);
+  const names = session.outputNames;
+  const lmT = out[names[0] as string] as ort.Tensor;
+  const scoreT = names.length > 1 ? (out[names[1] as string] as ort.Tensor) : null;
+  const raw = lmT.data as Float32Array;
+  const k = box.width / size;
+
+  const points: FaceLandmark[] = [];
+  for (let i = 0; i + 2 < raw.length; i += 3) {
+    points.push({
+      x: box.x + (raw[i] as number) * k,
+      y: box.y + (raw[i + 1] as number) * k,
+      z: (raw[i + 2] as number) * k,
+    });
+  }
+  const score = scoreT ? ((scoreT.data as Float32Array)[0] as number) : 0;
+  return { points, score };
+}
+
+/**
+ * 顔の起伏を深度へ入れる（docs/03 §3.4.5、v2.6）。
+ *
+ * 一般の深度モデルは顔をほぼ平らな楕円として返す。DA3 は Small でも
+ * Base でも鼻・眼窩・唇が出ず、入力解像度を上げても変わらない
+ * （faceSurface.ts の表）。顔専用の landmark モデルで面を起こし、
+ * 深度の細部の帯だけを差し替える。
+ *
+ * 顔検出モデルは載せない。マットから頭の位置を当てて 1 回目を回し、
+ * その landmark で切り直して 2 回目を回す。実測でモデルの自己申告
+ * スコアが 6.9 → 17.6 に上がった。
+ *
+ * 失敗しても生成は止めない。顔が写っていない写真のほうが普通である。
+ */
+async function applyFaceDepth(
+  depth: Float32Array,
+  rgba: Uint8ClampedArray,
+  alpha: Uint8ClampedArray,
+  grid: number,
+  focalPx: number,
+  backend: Backend,
+  shaderF16: boolean,
+): Promise<{ depth: Float32Array; applied: boolean }> {
+  const seed = headBoxFromMatte(alpha, grid, grid);
+  if (!seed) return { depth, applied: false };
+
+  let session: ort.InferenceSession;
+  try {
+    session = await loadModel(
+      'face-mesh',
+      backend,
+      { repo: 'astaileyyoung/FaceMeshONNX', file: 'mesh.onnx' },
+      shaderF16,
+    );
+  } catch {
+    return { depth, applied: false };
+  }
+
+  try {
+    // 切り直しながら数回まわす。マットから当てた初期位置は粗いので、
+    // 1 往復では足りないことがある。実測（床に座った人物）で
+    // −7.5 → 2.5 → 14.6 → 19.2 と、3 回目でようやく乗った。
+    let box = seed;
+    let best: { points: FaceLandmark[]; score: number; box: Rect } | null = null;
+    for (let i = 0; i < FACE_MAX_PASSES; i++) {
+      const r = await inferFaceLandmarks(session, rgba, grid, box);
+      if (!best || r.score > best.score) best = { ...r, box };
+      const next = boxFromLandmarks(r.points, grid, grid);
+      if (!next) break;
+      // 切り出しが動かなくなったら、それ以上まわしても変わらない。
+      if (Math.abs(next.x - box.x) + Math.abs(next.y - box.y) + Math.abs(next.width - box.width) < 4) {
+        box = next;
+        break;
+      }
+      box = next;
+    }
+    if (!best || best.score < FACE_MIN_SCORE) return { depth, applied: false };
+
+    const surface = faceDepthSurface(best.points, best.box);
+    if (surface.covered < FACE_MIN_PIXELS) return { depth, applied: false };
+    return {
+      depth: applyFaceRelief(depth, surface, best.box, grid, grid, focalPx),
+      applied: true,
+    };
+  } catch {
+    return { depth, applied: false };
+  }
 }
 
 export interface DepthOutput {
@@ -589,6 +731,18 @@ export async function generate(photo: Blob, options: GenerateOptions): Promise<G
     tileCount = tiled.tiles;
   }
 
+  // 顔の起伏。深度モデルは顔をほぼ平らな楕円として返すので、顔専用の
+  // landmark モデルで細部の帯だけを差し替える（docs/09 §V9）。
+  let faceApplied = false;
+  if (opts.mode === 'person' && depthOut.kind === 'depth') {
+    report(0.58, '顔の立体を起こしています');
+    const withFace = await mark('顔の起伏', () =>
+      applyFaceDepth(depthRaw, rgba, alpha, grid, focalPx, opts.backend, shaderF16),
+    );
+    depthRaw = withFace.depth;
+    faceApplied = withFace.applied;
+  }
+
   report(0.62, '奥行きを整えています');
   const calibrated = await mark('深度較正', () =>
     calibrate({
@@ -691,6 +845,7 @@ export async function generate(photo: Blob, options: GenerateOptions): Promise<G
       depthToHeight: calibrated.depthToHeight,
       depthToWidth: calibrated.depthToWidth,
       depthTiles: tileCount,
+      faceRelief: faceApplied,
       inpaint: inpaintUsed,
     },
   };

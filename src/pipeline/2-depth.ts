@@ -86,6 +86,15 @@ export interface DepthTile {
   readonly rect: Rect;
   /** モデルが返す信頼度（DA3 の `confidence`）。無ければ省略。 */
   readonly confidence?: ArrayLike<number>;
+  /**
+   * タイル内の 0..1 の重み。矩形の羽根に掛け合わせる（v2.6）。
+   *
+   * 四角い羽根では足りないタイルのために置く。顔の面（landmark から
+   * 起こしたもの）は四角の中でも顔の楕円の中しか信用できず、外は髪や
+   * 背景である。境目を四角の羽根に任せると、そこがラプラシアン
+   * ピラミッドで段差になって縞が出る。
+   */
+  readonly weight?: ArrayLike<number>;
 }
 
 export interface FuseParams {
@@ -215,6 +224,7 @@ export function fuseDepth(
         if (!Number.isFinite(v)) continue;
 
         let w = featherWeight(x, y, rect, params.feather);
+        if (tile.weight) w *= Math.max(0, Math.min(1, tile.weight[ti] as number));
         if (tile.confidence) {
           const c = tile.confidence[ti] as number;
           if (c < params.minConfidence) w = 0;

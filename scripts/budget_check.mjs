@@ -85,7 +85,14 @@ const backendBytes = (backend, ids) => {
 };
 
 const backends = manifest?.backends ?? ['webgpu', 'wasm'];
-const personIds = ['depth-anything-v3-small', 'modnet', 'mi-gan'];
+// 「最初の結果が出るまでに要る」モデル。
+//
+// mi-gan はここに入れない。⑧ インペイントはプレビューを出した**後**に、
+// 深度の段差が実際にあるときだけ走り、読み込めなければ stretch へ縮退する
+// （generate.ts の runInpaint）。待ち時間の頭に乗らないので、別の行で数える。
+const personIds = ['depth-anything-v3-small', 'modnet', 'u2netp', 'face-mesh'];
+/** 1 回の生成で落ちうる最大。インペイントまで走った場合。 */
+const personMaxIds = [...personIds, 'mi-gan'];
 const objectIds = ['isnet-general'];
 
 const depth = pick(/^depth-anything-v3-small\./) || pick(/^depth-anything-v2-small\./);
@@ -98,6 +105,10 @@ const firstVisitPerBackend = manifest
   : [];
 const firstVisit = firstVisitPerBackend.length
   ? Math.max(...firstVisitPerBackend.map((x) => x.bytes))
+  : depth + person;
+
+const personMax = manifest
+  ? Math.max(...backends.map((b) => backendBytes(b, personMaxIds) ?? 0))
   : depth + person + inpaint;
 
 const objectExtra = manifest
@@ -152,6 +163,7 @@ for (const { backend, bytes } of firstVisitPerBackend) {
   });
 }
 add('初回必須モデル (人物)', firstVisit, mb, budget.models?.['firstVisit.person']);
+add('1回の生成の最大 (人物)', personMax, mb, budget.models?.['generation.person.max']);
 add('物体モード追加分', objectExtra, mb, budget.models?.['objectMode.extra']);
 add('モデル合計 (配信側)', modelTotal, mb, budget.models?.total);
 add('Pages 全体 (非圧縮)', pagesTotal, mb, budget.pages?.totalUncompressed);

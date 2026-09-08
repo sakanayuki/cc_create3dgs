@@ -33,6 +33,7 @@
       "depthFallback": "depth-anything-v2-small",
       "mattePerson": "modnet",
       "mattePersonGate": "u2netp",
+      "face": "face-mesh",
       "matteObject": "isnet-general",
       "inpaint": "mi-gan"
     },
@@ -42,6 +43,7 @@
       "depthFallback": "depth-anything-v2-small",
       "mattePerson": "modnet",
       "mattePersonGate": "u2netp",
+      "face": "face-mesh",
       "matteObject": "rmbg-1.4",
       "inpaint": "mi-gan"
     }
@@ -311,7 +313,55 @@
         "遮蔽部インペイント（決定 D16）。モバイル向けに設計されたモデル。",
         "Places2 + FFHQ で学習。物体の規則的な模様は不得手（リスク R11）。",
         "GAN は量子化で崩れやすいので calibrationMethod は MinMax。PoC-1 で PSNR を確認する。",
-        "畳み込み中心なので q4f16 の恩恵が無い。両バックエンドとも uint8（決定 D22）。"
+        "畳み込み中心なので q4f16 の恩恵が無い。両バックエンドとも uint8（決定 D22）。",
+        "",
+        "firstVisit=false: ⑧ インペイントは、プレビューを出した**後**に、深度の段差が",
+        "実際にあるときだけ走る（generate.ts の runInpaint）。読み込めなければ stretch へ",
+        "縮退して生成は続く。したがって「最初の結果が出るまでに要るモデル」ではない。",
+        "1 回の生成で落ちうる最大には含まれるので、バジェットでは別の行で数える。"
+      ],
+      "firstVisit": false
+    },
+    "face-mesh": {
+      "role": "face",
+      "subject": "person",
+      "title": "MediaPipe Face Mesh V2（顔の 3D landmark）",
+      "url": "https://huggingface.co/astaileyyoung/FaceMeshONNX/resolve/main/mesh.onnx",
+      "sha256": "c334c26b128dfc709da0f353c6157ac340b785f5f25cdab5dbea12bbea243172",
+      "upstream": "google-ai-edge/mediapipe（face_landmark_with_attention）",
+      "license": "Apache-2.0",
+      "commercialUse": true,
+      "inputSize": [
+        256,
+        256
+      ],
+      "layout": "NHWC",
+      "expectedBytes": 2600000,
+      "quantization": {
+        "mode": "fp16",
+        "byBackend": {
+          "webgpu": "fp16",
+          "wasm": "fp16"
+        }
+      },
+      "notes": [
+        "一般の単眼深度モデルは顔をほぼ平らな楕円として返す。DA3 は Small(0.08B) でも",
+        "Base(0.12B) でも鼻・眼窩・唇が出ず、入力解像度を変えても変わらない",
+        "（src/pipeline/geometry/faceSurface.ts の表）。顔だけはこのモデルで面を起こす。",
+        "",
+        "478 点の 3D 座標を返す。x/y/z は同じ尺度（入力画素）で、z は頭の中心を原点に",
+        "した相対値。小さいほど手前で、深度モデルと向きが同じ。",
+        "",
+        "顔検出モデルは載せない。マットから頭の位置を当てて 1 回、その landmark で",
+        "切り直してもう 1 回回す（実測でスコア 6.9 → 17.6）。",
+        "",
+        "ライセンス: 重みは MediaPipe 本体（Apache-2.0）に同梱されているものである。",
+        "Google のドキュメントページ側には重みのライセンス表記が無いので、根拠は",
+        "リポジトリの LICENSE になる。ここで指す ONNX は MIT で再配布された変換版で、",
+        "SHA256 を固定している。",
+        "",
+        "uint8 量子化はしない。u2netp で出力が飽和して壊れた前例があり、座標を返す",
+        "モデルは量子化誤差がそのまま位置ずれになる。"
       ]
     }
   }

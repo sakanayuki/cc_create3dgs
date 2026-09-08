@@ -6,20 +6,26 @@
     "測った時間は実機について何も語らないため（docs/07 §7.5）。実機計測は",
     "?bench=1 で行い docs/measurements.md に記録する。"
   ],
-
   "bundle": {
-    "js.gzip":  { "warn": 280000, "fail": 400000 },
-    "css.gzip": { "warn": 15000,  "fail": 25000 }
+    "js.gzip": {
+      "warn": 280000,
+      "fail": 400000
+    },
+    "css.gzip": {
+      "warn": 15000,
+      "fail": 25000
+    }
   },
-
   "runtime": {
     "_comment": [
       "ONNX Runtime Web の wasm。設計 v2 の見積もりに入っていなかった実装上の発見。gzip 後で測る。",
       "マルチスレッド版(jsep)を配るので、単スレッド版より大きい（決定 D20）。"
     ],
-    "ort.wasm.gzip": { "warn": 7000000, "fail": 9000000 }
+    "ort.wasm.gzip": {
+      "warn": 7000000,
+      "fail": 9000000
+    }
   },
-
   "models": {
     "_comment": [
       "firstVisit / objectMode は「1台の端末が実際に落とす量」。D22 でモデルは",
@@ -43,26 +49,65 @@
       "",
       "total は配信側に置くファイルの合計で、利用者が待つ量ではない。",
       "予備の DA2 を Pages に置くのをやめたので（registry の deploy: false）、",
-      "約 49MB 減って 112MB 前後になる見込み。"
+      "約 49MB 減って 112MB 前後になる見込み。",
+      "",
+      "v2.6 で 2 行に分けた。firstVisit.person は「最初の結果が出るまでに落ちる量」で、",
+      "generation.person.max は「インペイントまで走った 1 回の生成の最大」。",
+      "mi-gan(10.6MB) はプレビューの後に、段差がある写真だけ遅延取得するので、",
+      "待ち時間の頭には乗らない。両方見えるようにして、隠さずに数える。"
     ],
-    "firstVisit.person": { "warn": 40000000, "fail": 50000000 },
-    "objectMode.extra":  { "warn": 45000000, "fail": 50000000 },
-    "total":             { "warn": 120000000, "fail": 140000000 }
+    "firstVisit.person": {
+      "warn": 40000000,
+      "fail": 50000000
+    },
+    "generation.person.max": {
+      "warn": 55000000,
+      "fail": 62000000
+    },
+    "objectMode.extra": {
+      "warn": 45000000,
+      "fail": 50000000
+    },
+    "total": {
+      "warn": 120000000,
+      "fail": 140000000
+    }
   },
-
   "pages": {
-    "totalUncompressed": { "warn": 200000000, "fail": 400000000 }
+    "totalUncompressed": {
+      "warn": 200000000,
+      "fail": 400000000
+    }
   },
-
   "output": {
     "_comment": "e2e テストが tests/results/metrics.json に書いた値を見る。無ければスキップ。",
-    "pgs.bytes":     { "warn": 800000, "fail": 1000000 },
-    "gaussianCount": { "warnRange": [300000, 500000], "failRange": [250000, 600000] }
+    "pgs.bytes": {
+      "warn": 800000,
+      "fail": 1000000
+    },
+    "gaussianCount": {
+      "warnRange": [
+        300000,
+        500000
+      ],
+      "failRange": [
+        250000,
+        600000
+      ]
+    }
   },
-
   "quality": {
-    "ssim.inputView":   { "warnMin": 0.93, "failMin": 0.92 },
-    "holeRatio.45deg":  { "warn": 0.01, "fail": 0.02 },
-    "stripeGain.45deg": { "warnMin": 0.4, "failMin": 0.3 }
+    "ssim.inputView": {
+      "warnMin": 0.93,
+      "failMin": 0.92
+    },
+    "holeRatio.45deg": {
+      "warn": 0.01,
+      "fail": 0.02
+    },
+    "stripeGain.45deg": {
+      "warnMin": 0.4,
+      "failMin": 0.3
+    }
   }
 }
