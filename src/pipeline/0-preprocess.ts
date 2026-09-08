@@ -61,6 +61,46 @@ export interface PreparedImage {
 }
 
 /**
+ * レターボックスの詰め物に、内容の端の画素を伸ばして入れる（α は 0 のまま）。
+ *
+ * 詰め物を黒のままモデルに渡すと、**内容の縁に強い段差ができる**。実写で
+ * 測ると、MODNet はその段差に反応して画像の左端に沿った縦帯を前景と
+ * 誤判定し、プールサイドを 88 画素ぶん被写体に含めていた（y=900 の行で、
+ * 腕は x=314 からなのに x=226 から被写体とされていた）。詰め物を端の
+ * 画素で埋めると x=312 まで下がり、正しくなる。被写体の内部にできていた
+ * 穴（同じ行で 2 か所）も消える。
+ *
+ * α は 0 のまま残す。後段が「ここに被写体は無い」と判別できる必要がある
+ * ので、そちらの意味は変えない。変えるのは RGB だけで、これはモデルが
+ * 見る値である。
+ */
+export function replicateEdgesIntoPadding(
+  rgba: Uint8ClampedArray,
+  size: number,
+  box: Letterbox,
+): void {
+  const x0 = box.offsetX;
+  const y0 = box.offsetY;
+  const x1 = box.offsetX + box.width - 1;
+  const y1 = box.offsetY + box.height - 1;
+  if (x0 <= 0 && y0 <= 0 && x1 >= size - 1 && y1 >= size - 1) return;
+
+  for (let y = 0; y < size; y++) {
+    const sy = Math.min(y1, Math.max(y0, y));
+    for (let x = 0; x < size; x++) {
+      if (x >= x0 && x <= x1 && y >= y0 && y <= y1) continue;
+      const sx = Math.min(x1, Math.max(x0, x));
+      const di = (y * size + x) * 4;
+      const si = (sy * size + sx) * 4;
+      rgba[di] = rgba[si] as number;
+      rgba[di + 1] = rgba[si + 1] as number;
+      rgba[di + 2] = rgba[si + 2] as number;
+      // α は 0 のまま
+    }
+  }
+}
+
+/**
  * 画像を作業グリッドに載せる。
  *
  * EXIF の回転は `createImageBitmap` の `imageOrientation: 'from-image'` に任せる。
@@ -79,7 +119,9 @@ export async function prepareImage(source: Blob, size = WORKING_GRID): Promise<P
     // 既定の transparent black のまま描く。clearRect も fillRect も要らない。
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(bitmap, box.offsetX, box.offsetY, box.width, box.height);
-    return { rgba: ctx.getImageData(0, 0, size, size).data, box };
+    const rgba = ctx.getImageData(0, 0, size, size).data;
+    replicateEdgesIntoPadding(rgba, size, box);
+    return { rgba, box };
   } finally {
     bitmap.close();
   }

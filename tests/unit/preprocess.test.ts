@@ -8,6 +8,7 @@ import {
   expandToSquare,
   gridToSource,
   letterbox,
+  replicateEdgesIntoPadding,
   subjectBBox,
 } from '../../src/pipeline/0-preprocess';
 
@@ -182,5 +183,74 @@ describe('正方への拡張', () => {
   it('すでに正方形ならそのまま', () => {
     const r = expandToSquare({ x: 10, y: 20, width: 300, height: 300 }, 1024, 1024);
     expect(r).toEqual({ x: 10, y: 20, width: 300, height: 300 });
+  });
+});
+
+describe('レターボックスの詰め物（v2.3、実写で判明）', () => {
+  const SZ = 16;
+
+  /** 幅 8・高さ 16 の内容を中央に置いた RGBA。詰め物は透明な黒のまま。 */
+  function scene() {
+    const box = letterbox(8, 16, SZ);
+    const rgba = new Uint8ClampedArray(SZ * SZ * 4);
+    for (let y = box.offsetY; y < box.offsetY + box.height; y++) {
+      for (let x = box.offsetX; x < box.offsetX + box.width; x++) {
+        const i = (y * SZ + x) * 4;
+        rgba[i] = 200;
+        rgba[i + 1] = 180;
+        rgba[i + 2] = 160;
+        rgba[i + 3] = 255;
+      }
+    }
+    return { rgba, box };
+  }
+
+  it('詰め物の RGB が内容の端の色になる', () => {
+    // 黒のままモデルへ渡すと、内容の縁に強い段差ができる。実写では
+    // MODNet がその段差に反応して、画像の左端に沿ったプールサイドを
+    // 88 画素ぶん被写体に含めていた。
+    const { rgba, box } = scene();
+    replicateEdgesIntoPadding(rgba, SZ, box);
+    const at = (x: number, y: number): number[] => {
+      const i = (y * SZ + x) * 4;
+      return [rgba[i] as number, rgba[i + 1] as number, rgba[i + 2] as number];
+    };
+    expect(at(0, 8)).toEqual([200, 180, 160]);
+    expect(at(SZ - 1, 8)).toEqual([200, 180, 160]);
+    expect(at(box.offsetX, 8)).toEqual([200, 180, 160]);
+  });
+
+  it('詰め物の α は 0 のまま', () => {
+    // 後段は α で「ここに被写体は無い」を判別する。意味を変えてはいけない。
+    const { rgba, box } = scene();
+    replicateEdgesIntoPadding(rgba, SZ, box);
+    for (let y = 0; y < SZ; y++) {
+      for (let x = 0; x < SZ; x++) {
+        const inside =
+          x >= box.offsetX &&
+          x < box.offsetX + box.width &&
+          y >= box.offsetY &&
+          y < box.offsetY + box.height;
+        if (!inside) expect(rgba[(y * SZ + x) * 4 + 3]).toBe(0);
+      }
+    }
+  });
+
+  it('内容の縁に段差が残らない', () => {
+    const { rgba, box } = scene();
+    replicateEdgesIntoPadding(rgba, SZ, box);
+    // 縁をまたぐ左右の差
+    const y = 8;
+    const l = (box.offsetX - 1) * 4 + y * SZ * 4;
+    const r = box.offsetX * 4 + y * SZ * 4;
+    expect(Math.abs((rgba[l] as number) - (rgba[r] as number))).toBe(0);
+  });
+
+  it('詰め物が無ければ何もしない', () => {
+    const box = letterbox(16, 16, SZ);
+    const rgba = new Uint8ClampedArray(SZ * SZ * 4).fill(77);
+    const before = Uint8ClampedArray.from(rgba);
+    replicateEdgesIntoPadding(rgba, SZ, box);
+    expect(rgba).toEqual(before);
   });
 });

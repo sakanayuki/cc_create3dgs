@@ -547,8 +547,12 @@ export async function generate(photo: Blob, options: GenerateOptions): Promise<G
   // 髪や輪郭の半透明画素（0 < α < 0.5）は、深度モデルには背景が混ざって
   // 見えている。その深度をそのまま使うと、髪が後ろへ長く尾を引く。
   // 最も近い不透明画素の深度で置き換える（docs/03 §3.5.3(c)）。
+  // にじみの帯はモデルの推論解像度（518²）で決まるので、作業グリッドに
+  // 対する割合で置く。1024² なら 8px。実測では 8px で最奥張り付きが
+  // 56% → 6.6% まで落ちる。
+  const boundaryBand = Math.max(2, Math.round(grid * 0.008));
   const pulled = await mark('境界深度の引き込み', () =>
-    pullBoundaryDepthInward(calibrated.depth, alpha, grid, grid),
+    pullBoundaryDepthInward(calibrated.depth, alpha, grid, grid, boundaryBand),
   );
 
   // 0..1 に直した深度。以降の工程はこの形で受け取る。

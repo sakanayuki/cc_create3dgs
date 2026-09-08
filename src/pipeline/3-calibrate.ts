@@ -568,25 +568,77 @@ export function calibrate(input: CalibrationInput): CalibrationResult {
 }
 
 /**
- * α の軟化境界にある画素の深度を、最も近い被写体内部の深度で置き換える（docs/03 §3.5.3(c)）。
+ * シルエット近傍の画素の深度を、内側の値で置き換える（docs/03 §3.5.3(c)）。
  *
- * 0 < α < 0.5 の画素は、深度モデルには背景が混ざって見えている。
- * その深度をそのまま使うと、縁の半透明ガウシアンが背景側へ飛び出す。
+ * 単眼深度モデルは物体の縁で前景と背景を混ぜた値を返す。にじみは
+ * α の軟化部分（0 < α < 0.5）だけでなく、**α が 1 の内側にも数画素
+ * 続く**。モデルは 518² で推論して 1024² へ引き伸ばすので、そのぶん
+ * 帯も広がる。
+ *
+ * 実写で測ったにじみ（深度が最奥に張り付いた画素の割合）:
+ *
+ * | シルエットからの距離 | 1px | 2px | 4px | 6px | 8px | 12px |
+ * |---|---|---|---|---|---|---|
+ * | 最奥に張り付き | 56% | 45% | 28% | 14% | 6.6% | 3.0% |
+ *
+ * この帯を放置すると、輪郭に沿って**最奥に張り付いたサーフェルの膜**が
+ * できる。正面からは体の陰に隠れて見えないが、少し回すと体の後ろへ
+ * 伸びる平らな板として現れる。実写では被写体の 6.9% がこれだった。
+ *
+ * @param coreDistance この距離より内側を「信用できる芯」とみなす。
+ *                     0 なら軟化 α の置き換えだけを行う（従来の挙動）。
  */
 export function pullBoundaryDepthInward(
   depth: Uint16Array,
   alpha: ArrayLike<number>,
   width: number,
   height: number,
+  coreDistance = 0,
 ): Uint16Array {
-  const nearest = nearestForegroundIndex(alpha, width, height, (v) => v >= SUBJECT_THRESHOLD);
   const out = new Uint16Array(depth);
+
+  // (a) 軟化境界（0 < α < 0.5）は、最も近い「α が立っている」画素から採る。
+  const nearestSubject = nearestForegroundIndex(alpha, width, height, (v) => v >= SUBJECT_THRESHOLD);
   for (let i = 0; i < depth.length; i++) {
     const a = alpha[i] as number;
     if (a > 0 && a < SUBJECT_THRESHOLD) {
-      const src = nearest[i] as number;
+      const src = nearestSubject[i] as number;
       if (src >= 0) out[i] = depth[src] as number;
     }
   }
-  return out;
+  if (coreDistance <= 0) return out;
+
+  // (b) α が立っていても、シルエットから coreDistance 以内はにじみの帯。
+  //     そこより内側の「芯」の値で置き換える。
+  const dist = distanceTransform(alpha, width, height, (v) => v >= SUBJECT_THRESHOLD);
+  const core = new Uint8Array(width * height);
+  let coreCount = 0;
+  for (let i = 0; i < core.length; i++) {
+    if ((alpha[i] as number) >= SUBJECT_THRESHOLD && (dist[i] as number) >= coreDistance) {
+      core[i] = 1;
+      coreCount++;
+    }
+  }
+  // 芯が残らないほど細い被写体では、置き換える先が無い。触らない。
+  if (coreCount === 0) return out;
+
+  const nearestCore = nearestForegroundIndex(core, width, height, (v) => v !== 0);
+  const pulled = new Uint16Array(out);
+  for (let i = 0; i < depth.length; i++) {
+    if ((alpha[i] as number) < SUBJECT_THRESHOLD) continue;
+    if ((dist[i] as number) >= coreDistance) continue;
+    const src = nearestCore[i] as number;
+    if (src >= 0) pulled[i] = out[src] as number;
+  }
+
+  // (c) 軟化境界は、引き込んだあとの値でもう一度採り直す。
+  //     (a) で拾った先が帯の中だと、にじんだ値のままになる。
+  for (let i = 0; i < depth.length; i++) {
+    const a = alpha[i] as number;
+    if (a > 0 && a < SUBJECT_THRESHOLD) {
+      const src = nearestSubject[i] as number;
+      if (src >= 0) pulled[i] = pulled[src] as number;
+    }
+  }
+  return pulled;
 }
