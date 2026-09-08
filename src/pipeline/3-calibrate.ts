@@ -36,6 +36,12 @@ export interface CalibrationInput {
    * 実寸経路（depthToWidthRatio 未指定）でのみ効く。
    */
   readonly bandMaxRatio?: number;
+
+  /**
+   * 輪郭の帯の広さ（画素）。既定は被写体の短辺 × RIM_BAND_RATIO。
+   * 0 にすると輪郭の処理を止める。
+   */
+  readonly rimBand?: number;
   /**
    * 局所的な起伏の強調倍率（1 で無効）。
    *
@@ -119,6 +125,15 @@ const PLAUSIBLE_DEPTH_TO_WIDTH = { min: 0.40, max: 0.85 } as const;
  * 切ると人が板になる。
  */
 const PLAUSIBLE_BAND_DEPTH_TO_WIDTH = 0.70;
+
+/**
+ * 輪郭の帯の広さ（被写体の短辺に対する割合）。
+ *
+ * 深度モデルの推論解像度（518²）に対する 1 画素ぶんの帯が、作業グリッドでは
+ * その比率ぶん広がる。実測では 8-16px（1024² で短辺 466px のとき）まで
+ * ずれが内部の 2 倍あった。0.035 は短辺 466px で 16px になる。
+ */
+const RIM_BAND_RATIO = 0.035;
 
 /**
  * 高さ方向の帯ごとに「奥行き ÷ 幅」を見て、人体としてあり得ない帯だけ潰す
@@ -632,6 +647,15 @@ export function enhanceRelief(
   height: number,
   radius: number,
   boost: number,
+  /**
+   * この画素数ぶんの輪郭の帯では、強調を 1 倍へ落とす（v2.6）。
+   *
+   * アンシャープマスクは「まわりの平均」との差を増幅する。輪郭では平均を
+   * 取る窓が片側に欠けるので、その差は形ではなく**窓の欠けかた**を写す。
+   * そこを 3 倍すると縁が前後へ棘のように飛び出す。0 なら従来どおり
+   * 全面を強調する。
+   */
+  rimBand = 0,
 ): Float32Array {
   if (boost <= 1 || radius < 1) return z;
 
@@ -657,6 +681,8 @@ export function enhanceRelief(
   const base = maskedBoxMean(z, alpha, width, height, outer);
   const fine = inner < outer ? maskedBoxMean(z, alpha, width, height, inner) : z;
 
+  const rim = rimBand >= 1 ? silhouetteDistance(alpha, width, height, Math.ceil(rimBand)) : null;
+
   const out = new Float32Array(z.length);
   for (let i = 0; i < z.length; i++) {
     if ((alpha[i] as number) < SUBJECT_THRESHOLD) {
@@ -665,9 +691,91 @@ export function enhanceRelief(
     }
     const b = base[i] as number;
     const f = fine[i] as number;
-    out[i] = b + (f - b) * boost + ((z[i] as number) - f);
+    const k = rim ? 1 + (boost - 1) * Math.min(1, (rim[i] as number) / rimBand) : boost;
+    out[i] = b + (f - b) * k + ((z[i] as number) - f);
   }
   return out;
+}
+
+/**
+ * シルエットから `band` 画素の帯の深度を、内側の値へ寄せて落ち着かせる
+ * （v2.6、実写での「境界が手前に突起する」報告から）。
+ *
+ * 単眼深度モデルの縁での値は**本質的に当てにならない**。実写で、局所中央値
+ * からのずれ（p99）を距離帯ごとに測ると:
+ *
+ * | シルエットからの距離 | 1-4px | 4-8px | 8-16px | 16-32px | 32px 以上 |
+ * |---|---|---|---|---|---|
+ * | ずれ p99 | 0.280 | 0.045 | 0.014 | 0.0065 | 0.0070 |
+ *
+ * 縁は内部の **40 倍** ばらつく。そこへ局所強調が 3 倍を掛けるので、顎や肩や
+ * 手の縁が前後へ棘のように飛び出す。`pullBoundaryDepthInward` は最外周の
+ * にじみ（背景が混ざって**奥**へ張り付くほう）を直すが、こちらの棘は残る。
+ *
+ * ここでは棘だけを均す。内側ほど原形を残すよう、重みを距離で線形に落とす。
+ * 体の丸みそのもの（縁で数 % 奥へ引く）は箱平均にも入っているので消えない。
+ */
+export function calmSilhouetteRim(
+  z: Float32Array,
+  alpha: ArrayLike<number>,
+  width: number,
+  height: number,
+  band: number,
+  radius: number,
+): Float32Array {
+  if (band < 1 || radius < 1) return z;
+  const dist = silhouetteDistance(alpha, width, height, band);
+  const mean = maskedBoxMean(z, alpha, width, height, radius);
+  const out = new Float32Array(z);
+  for (let i = 0; i < z.length; i++) {
+    if ((alpha[i] as number) < SUBJECT_THRESHOLD) continue;
+    const d = dist[i] as number;
+    if (d >= band) continue;
+    const w = 1 - d / band;
+    out[i] = (z[i] as number) * (1 - w) + (mean[i] as number) * w;
+  }
+  return out;
+}
+
+/**
+ * 被写体画素の「シルエットまでの距離」（`limit` で打ち切る）。
+ *
+ * 打ち切るのは、必要なのが縁の数十画素だけだからである。全画素で正確な
+ * 距離変換を回す意味がない。収縮を `limit` 回繰り返すだけで済む。
+ */
+function silhouetteDistance(
+  alpha: ArrayLike<number>,
+  width: number,
+  height: number,
+  limit: number,
+): Float32Array {
+  const dist = new Float32Array(width * height).fill(limit);
+  let cur = new Uint8Array(width * height);
+  for (let i = 0; i < cur.length; i++) cur[i] = (alpha[i] as number) >= SUBJECT_THRESHOLD ? 1 : 0;
+  for (let i = 0; i < cur.length; i++) if (!cur[i]) dist[i] = 0;
+
+  const next = new Uint8Array(width * height);
+  for (let k = 1; k < limit; k++) {
+    let any = false;
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const i = y * width + x;
+        if (!cur[i]) {
+          next[i] = 0;
+          continue;
+        }
+        const eroded =
+          x > 0 && x < width - 1 && y > 0 && y < height - 1 &&
+          cur[i - 1] === 1 && cur[i + 1] === 1 && cur[i - width] === 1 && cur[i + width] === 1;
+        next[i] = eroded ? 1 : 0;
+        if (!eroded && (dist[i] as number) > k - 1) dist[i] = k - 1;
+        if (eroded) any = true;
+      }
+    }
+    cur.set(next);
+    if (!any) break;
+  }
+  return dist;
 }
 
 /**
@@ -748,13 +856,21 @@ export function calibrate(input: CalibrationInput): CalibrationResult {
     }
   }
 
+  // --- ②.5 輪郭の棘を先に均す
+  //
+  // 縁の深度は内部の 40 倍ばらつく。強調（③）はそれを 3 倍にするので、
+  // 先に落ち着かせておく。順番が逆だと棘を増幅してから均すことになり、
+  // 均しきれずに顎・肩・手の縁が前後へ飛び出す。
+  const radius = Math.max(1, Math.round(shortSide * reliefRadius));
+  const rimBand = input.rimBand ?? Math.max(2, Math.round(shortSide * RIM_BAND_RATIO));
+  z = calmSilhouetteRim(z, alpha, width, height, rimBand, Math.max(2, Math.round(radius / 2)));
+
   // --- ③ 局所の起伏を持ち上げる
   //
   // 上がるのは顔の凹凸や服のしわだけ。大域の形（＝体の奥行きの比率）は
-  // 変えない。
-  const radius = Math.max(1, Math.round(shortSide * reliefRadius));
+  // 変えない。輪郭の帯では強調を 1 倍へ落とす（②.5 参照）。
   const beforeBoost = subjectExtent(z, alpha);
-  z = enhanceRelief(z, alpha, width, height, radius, boost);
+  z = enhanceRelief(z, alpha, width, height, radius, boost, rimBand);
 
   // 強調は「平滑化からのずれ」を倍にするので、切り残した外れ値も倍になる。
   // クリップの縁に張り付いた画素が、強調後に大きく飛び出す。もう一度

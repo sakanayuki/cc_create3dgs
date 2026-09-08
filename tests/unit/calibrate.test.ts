@@ -8,6 +8,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   calibrate,
+  calmSilhouetteRim,
   enhanceRelief,
   flattenImplausibleBands,
   estimateNormals,
@@ -672,5 +673,107 @@ describe('人体としてあり得ない帯を潰す（v2.5）', () => {
     };
     const out = flattenImplausibleBands(z, alpha, W, H, FOCAL, 0.7);
     expect(med(out, 10, 40) - med(out, 40, 70)).toBeGreaterThan(0.25);
+  });
+});
+
+describe('輪郭の棘を均す（v2.6、境界が突起するとの報告から）', () => {
+  const W = 80;
+  const H = 80;
+
+  /** 中央の円盤。滑らかなドーム状の深度に、縁だけ棘を立てる。 */
+  function disc(spike: number) {
+    const z = new Float32Array(W * H);
+    const alpha = new Uint8ClampedArray(W * H);
+    const cx = 40;
+    const cy = 40;
+    const r = 28;
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const dx = x - cx;
+        const dy = y - cy;
+        const t = Math.sqrt(dx * dx + dy * dy) / r;
+        if (t > 1) continue;
+        const i = y * W + x;
+        alpha[i] = 255;
+        z[i] = 1 - 0.1 * Math.sqrt(Math.max(0, 1 - t * t)); // ドーム
+        // 縁から 3px 以内の画素に、交互の符号で棘を立てる
+        if (t > 1 - 3 / r) z[i] += (x % 2 === 0 ? spike : -spike);
+      }
+    }
+    return { z, alpha };
+  }
+
+  /** 縁の帯での「局所平均からのずれ」の最大値。棘の高さを測る。 */
+  function rimSpike(z: Float32Array, alpha: Uint8ClampedArray, band = 4): number {
+    let worst = 0;
+    for (let y = 1; y < H - 1; y++) {
+      for (let x = 1; x < W - 1; x++) {
+        const i = y * W + x;
+        if ((alpha[i] as number) < 128) continue;
+        // 縁からの距離を粗く見る: 4近傍のどれかが被写体外なら縁
+        let d = 0;
+        while (d < band) {
+          const l = x - d - 1;
+          const r = x + d + 1;
+          if (l < 0 || r >= W) break;
+          if ((alpha[y * W + l] as number) < 128 || (alpha[y * W + r] as number) < 128) break;
+          d++;
+        }
+        if (d >= band) continue;
+        let sum = 0;
+        let n = 0;
+        for (let dy = -2; dy <= 2; dy++) {
+          for (let dx = -2; dx <= 2; dx++) {
+            const j = (y + dy) * W + (x + dx);
+            if (j < 0 || j >= W * H || (alpha[j] as number) < 128) continue;
+            sum += z[j] as number;
+            n++;
+          }
+        }
+        if (n < 4) continue;
+        worst = Math.max(worst, Math.abs((z[i] as number) - sum / n));
+      }
+    }
+    return worst;
+  }
+
+  it('縁の棘を落とす', () => {
+    const { z, alpha } = disc(0.05);
+    const before = rimSpike(z, alpha);
+    const after = rimSpike(calmSilhouetteRim(z, alpha, W, H, 6, 4), alpha);
+    expect(before, `棘 ${before.toFixed(4)}`).toBeGreaterThan(0.03);
+    expect(after, `棘 ${before.toFixed(4)} → ${after.toFixed(4)}`).toBeLessThan(before * 0.5);
+  });
+
+  it('内部の形は変えない', () => {
+    const { z, alpha } = disc(0.05);
+    const out = calmSilhouetteRim(z, alpha, W, H, 6, 4);
+    // 円盤の中心付近（縁から 10px 以上）は 1 画素も動かないこと
+    for (let y = 22; y < 58; y++) {
+      for (let x = 22; x < 58; x++) {
+        const i = y * W + x;
+        const dx = x - 40;
+        const dy = y - 40;
+        if (Math.sqrt(dx * dx + dy * dy) > 18) continue;
+        expect(out[i]).toBe(z[i]);
+      }
+    }
+  });
+
+  it('帯 0 なら何もしない', () => {
+    const { z, alpha } = disc(0.05);
+    expect(calmSilhouetteRim(z, alpha, W, H, 0, 4)).toBe(z);
+  });
+
+  it('強調は輪郭で 1 倍まで落ちる', () => {
+    // 縁の画素は増幅されず、内部の画素は増幅されること。
+    const { z, alpha } = disc(0);
+    const plain = enhanceRelief(z, alpha, W, H, 8, 3);
+    const tapered = enhanceRelief(z, alpha, W, H, 8, 3, 6);
+    const edge = 40 * W + 14; // 中心から 26px（縁から 2px）
+    const core = 40 * W + 40;
+    expect(Math.abs((tapered[edge] as number) - (z[edge] as number)))
+      .toBeLessThan(Math.abs((plain[edge] as number) - (z[edge] as number)) * 0.7);
+    expect(tapered[core]).toBeCloseTo(plain[core] as number, 6);
   });
 });
