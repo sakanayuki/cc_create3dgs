@@ -32,8 +32,22 @@ function standingAlpha(): Uint8ClampedArray {
   return a;
 }
 
-/** 顔の landmark を模す。中央が手前（z が小さい）に出た面。 */
-function fakeFace(cx: number, cy: number, r: number, n = 300): FaceLandmark[] {
+/**
+ * 顔の landmark を模す。中央が手前（z が小さい）に出た面。
+ *
+ * @param bump  中央に置く細部（鼻に当たる）の高さ[px]。0 なら大域だけの面。
+ * @param sigma その細部の広がり[px]。
+ * @param dome  面ぜんたいの丸み[px]（大域）。
+ */
+function fakeFace(
+  cx: number,
+  cy: number,
+  r: number,
+  n = 300,
+  bump = 0,
+  sigma = 8,
+  dome = 20,
+): FaceLandmark[] {
   const pts: FaceLandmark[] = [];
   // 決定的な螺旋配置。乱数は使わない。
   for (let i = 0; i < n; i++) {
@@ -41,11 +55,16 @@ function fakeFace(cx: number, cy: number, r: number, n = 300): FaceLandmark[] {
     const rr = r * Math.sqrt(i / n);
     const x = cx + rr * Math.cos(t);
     const y = cy + rr * Math.sin(t);
-    // 中央ほど手前（鼻）
-    const z = 20 * (rr / r) - 20;
+    // 大域は中央ほど手前の、なだらかな丸み。
+    const z = dome * (rr / r) - dome - bump * Math.exp(-((rr / sigma) ** 2));
     pts.push({ x, y, z });
   }
   return pts;
+}
+
+/** z が一定の面。大域しか持たない landmark 面を作る。 */
+function flatFace(cx: number, cy: number, r: number, n = 300): FaceLandmark[] {
+  return fakeFace(cx, cy, r, n).map((p) => ({ x: p.x, y: p.y, z: 0 }));
 }
 
 describe('マットから頭の位置を当てる', () => {
@@ -160,7 +179,8 @@ describe('landmark から顔の面を起こす', () => {
 
 describe('顔の起伏を深度へ入れる', () => {
   const rect = { x: 68, y: 68, width: 120, height: 120 };
-  const pts = fakeFace(128, 128, 40);
+  /** 大域の丸み（20px）に、鼻に当たる細部（15px）を載せた顔。 */
+  const pts = fakeFace(128, 128, 40, 300, 15);
   const FOCAL = 500;
 
   /** 平らな顔（深度モデルが返すもの）。 */
@@ -176,22 +196,14 @@ describe('顔の起伏を深度へ入れる', () => {
   });
 
   it('大きさは幾何から決まる（当てはめに頼らない）', () => {
-    // landmark の z 幅は 20px。距離 1、焦点 500 なら 20/500 = 0.04 のはず。
+    // 細部（鼻）の高さは landmark で 15px。距離 1、焦点 500 なら
+    // 15 / 500 = 0.03 に当たる。平滑化で少し目減りする。
     const s = faceDepthSurface(pts, rect);
-    const out = applyFaceRelief(flatDepth(), s, rect, G, G, FOCAL);
-    let lo = Infinity;
-    let hi = -Infinity;
-    for (let y = 0; y < rect.height; y++) {
-      for (let x = 0; x < rect.width; x++) {
-        if ((s.weight[y * rect.width + x] as number) < 0.5) continue;
-        const v = out[(rect.y + y) * G + (rect.x + x)] as number;
-        if (v < lo) lo = v;
-        if (v > hi) hi = v;
-      }
-    }
-    const span = hi - lo;
-    expect(span, `顔の奥行き幅 ${span.toFixed(4)}`).toBeGreaterThan(0.015);
-    expect(span, `顔の奥行き幅 ${span.toFixed(4)}`).toBeLessThan(0.06);
+    const base = flatDepth();
+    const out = applyFaceRelief(base, s, rect, G, G, FOCAL);
+    const rise = (base[128 * G + 128] as number) - (out[128 * G + 128] as number);
+    expect(rise, `鼻の高さ ${rise.toFixed(4)}`).toBeGreaterThan(0.015);
+    expect(rise, `鼻の高さ ${rise.toFixed(4)}`).toBeLessThan(0.035);
   });
 
   it('顔の外は動かさない', () => {
@@ -229,5 +241,96 @@ describe('顔の起伏を深度へ入れる', () => {
     const base = flatDepth();
     const out = applyFaceRelief(base, s, rect, G, G, FOCAL);
     for (let i = 0; i < base.length; i += 997) expect(out[i]).toBe(base[i]);
+  });
+});
+
+/**
+ * v2.6.1 の回帰（docs/09 §V13）。
+ *
+ * landmark 面は「カメラを向いた顔の統計的な型」であって、この人の頭が
+ * どれだけ丸いかは知らない。以前はラプラシアンブレンドで大域まで
+ * landmark 面に置き換わっており、実測（プールの写真）で深度モデルの顔
+ * （奥行き 49mm）と landmark 面（17mm）が **15mm** 食い違ったまま楕円の
+ * 重みで切られ、左頬が 7mm 手前へ、額が奥へ動く低周波のうねりになった。
+ * 顔の輪郭に沿った隆起として見える。
+ */
+describe('顔の輪郭に沿った隆起（v2.6.1）', () => {
+  const rect = { x: 68, y: 68, width: 120, height: 120 };
+  const FOCAL = 500;
+
+  function domeDepth(span: number): Float32Array {
+    const d = new Float32Array(G * G).fill(1);
+    for (let y = 0; y < G; y++) {
+      for (let x = 0; x < G; x++) {
+        const r = Math.min(1, Math.hypot(x - 128, y - 128) / 60);
+        d[y * G + x] = 1 + span * r * r;
+      }
+    }
+    return d;
+  }
+
+  it('landmark 面が大域しか持たないなら深度は 1 画素も動かない', () => {
+    // z が一定 = 細部が無い面。足すべきものが無いのだから、何も足さない。
+    const s = faceDepthSurface(flatFace(128, 128, 40), rect);
+    expect(s.covered).toBeGreaterThan(1000);
+    const base = domeDepth(0.05);
+    const out = applyFaceRelief(base, s, rect, G, G, FOCAL);
+    let worst = 0;
+    for (let i = 0; i < base.length; i++) {
+      worst = Math.max(worst, Math.abs((out[i] as number) - (base[i] as number)));
+    }
+    expect(worst, `最大の動き ${worst.toFixed(6)}`).toBeLessThan(1e-6);
+  });
+
+  it('深度モデルが持つ顔の丸みを landmark 面が上書きしない', () => {
+    // 深度モデルは 50mm の丸みを持ち、landmark 面は 10mm ぶんしか持たない
+    // （実測でも 49mm 対 17mm だった）。食い違うのは landmark 面のほうが
+    // 型でしかないからで、出力に残る丸みは深度モデルのままであること。
+    const s = faceDepthSurface(fakeFace(128, 128, 40, 300, 15, 8, 5), rect);
+    const base = domeDepth(0.05);
+    const out = applyFaceRelief(base, s, rect, G, G, FOCAL);
+    // 顔の縁（半径 36px）と中央の差＝丸み。鼻の細部を避けて縁だけで測る。
+    const ringOf = (d: ArrayLike<number>, r: number): number => {
+      let sum = 0;
+      let n = 0;
+      for (let a = 0; a < 64; a++) {
+        const th = (a / 64) * Math.PI * 2;
+        const x = Math.round(128 + r * Math.cos(th));
+        const y = Math.round(128 + r * Math.sin(th));
+        sum += d[y * G + x] as number;
+        n++;
+      }
+      return sum / n;
+    };
+    const before = ringOf(base, 36) - ringOf(base, 12);
+    const after = ringOf(out, 36) - ringOf(out, 12);
+    expect(before).toBeGreaterThan(0.01);
+    expect(after / before, `丸みの残り ${(after / before).toFixed(2)} 倍`).toBeGreaterThan(0.8);
+  });
+
+  it('楕円の羽根のところに隆起の輪ができない', () => {
+    const s = faceDepthSurface(fakeFace(128, 128, 40, 300, 15, 8, 5), rect);
+    const base = domeDepth(0.05);
+    const out = applyFaceRelief(base, s, rect, G, G, FOCAL);
+    // 半径ごとの平均の差。羽根は t=0.75..1.1、つまり半径 28..42px に当たる。
+    const prof = (r: number): number => {
+      let sum = 0;
+      let n = 0;
+      for (let a = 0; a < 128; a++) {
+        const th = (a / 128) * Math.PI * 2;
+        const x = Math.round(128 + r * Math.cos(th));
+        const y = Math.round(128 + r * Math.sin(th));
+        sum += (out[y * G + x] as number) - (base[y * G + x] as number);
+        n++;
+      }
+      return sum / n;
+    };
+    // 鼻の高さ（中央の動き）を物差しにする。
+    const nose = Math.abs(prof(0));
+    expect(nose, `鼻の高さ ${(nose * 1000).toFixed(2)}mm`).toBeGreaterThan(0.005);
+    for (let r = 26; r <= 46; r += 2) {
+      const v = prof(r);
+      expect(Math.abs(v) / nose, `半径 ${r}px の動き ${(v * 1000).toFixed(2)}mm`).toBeLessThan(0.25);
+    }
   });
 });

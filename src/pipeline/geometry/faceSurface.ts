@@ -22,7 +22,6 @@
  * ここに置くのは純粋な計算だけ。モデルの実行は generate.ts が持つ。
  */
 import type { Rect } from '../0-preprocess';
-import { blendLaplacian } from './pyramid';
 
 /** 画像座標での landmark（z は同じ尺度の相対値。小さいほど手前）。 */
 export interface FaceLandmark {
@@ -33,6 +32,18 @@ export interface FaceLandmark {
 
 /** α がこの値以上を被写体とみなす。 */
 const SUBJECT_THRESHOLD = 128;
+
+/** 重みが 1 のままの楕円の内側（楕円半径に対する比）。 */
+const WEIGHT_CORE = 0.75;
+/** 重みが 0 になる楕円（同）。CORE との差が羽根の幅になる。 */
+const WEIGHT_EDGE = 1.1;
+/**
+ * 「大域」と「細部」の境目を、顔の楕円半径の何倍の平均で切るか。
+ *
+ * 0.5 なら顔の半径ほどの箱平均。鼻（長さは顔の高さの 1/3 ほど）・眉・
+ * 眼窩・唇はこれより細かいので細部に残り、顔全体の丸みだけが落ちる。
+ */
+const TREND_RADIUS_RATIO = 0.5;
 
 /**
  * マットから顔の初期位置を当てる（頭の外接四角、正方）。
@@ -164,6 +175,14 @@ export interface FaceSurface {
   readonly weight: Float32Array;
   /** 重みが 0 でない画素の数。少なすぎるときは呼び出し側が捨てる。 */
   readonly covered: number;
+  /**
+   * 「大域」と「細部」を分ける半径（rect の画素）。
+   *
+   * この半径の平均より粗い成分は landmark 面から捨て、深度モデルのものを
+   * 使う（`applyFaceRelief`）。顔の大きさから決めるので、寄りでも引きでも
+   * 同じ構造（鼻・眉・眼窩・唇）が細部側に残る。
+   */
+  readonly trendRadius: number;
 }
 
 /**
@@ -188,7 +207,7 @@ export function faceDepthSurface(
   const n = rect.width * rect.height;
   const depth = new Float32Array(n);
   const weight = new Float32Array(n);
-  if (points.length < 16) return { depth, weight, covered: 0 };
+  if (points.length < 16) return { depth, weight, covered: 0, trendRadius: 1 };
 
   // 顔の楕円は landmark の**外接矩形**から作る。
   //
@@ -225,8 +244,13 @@ export function faceDepthSurface(
       const nx = (gx - cx) / rx;
       const ny = (gy - cy) / ry;
       const t = Math.sqrt(nx * nx + ny * ny);
-      // 楕円の内側 0.8 までは 1、1.0 で 0。境目を滑らかにする。
-      const w = t <= 0.8 ? 1 : t >= 1 ? 0 : smoothstep((1 - t) / 0.2);
+      // 楕円の内側 CORE までは 1、EDGE で 0。境目を滑らかにする。
+      const w =
+        t <= WEIGHT_CORE
+          ? 1
+          : t >= WEIGHT_EDGE
+            ? 0
+            : smoothstep((WEIGHT_EDGE - t) / (WEIGHT_EDGE - WEIGHT_CORE));
       weight[i] = w;
       if (w <= 0) continue;
       covered++;
@@ -247,7 +271,13 @@ export function faceDepthSurface(
 
   // 点に張り付いた凸凹を、点間隔ぶんだけ均す。
   const radius = Math.max(1, Math.round(spacing * 0.5));
-  return { depth: boxBlur(depth, rect.width, rect.height, radius), weight, covered };
+  const trendRadius = Math.max(2, Math.round(Math.max(rx, ry) * TREND_RADIUS_RATIO));
+  return {
+    depth: boxBlur(depth, rect.width, rect.height, radius),
+    weight,
+    covered,
+    trendRadius,
+  };
 }
 
 function smoothstep(t: number): number {
@@ -300,16 +330,29 @@ function boxBlur(src: Float32Array, width: number, height: number, radius: numbe
  * landmark の z は crop の画素と同じ尺度（弱透視）なので、尺度は幾何から
  * 出せる。距離 Z にある面では 1 画素が Z / f の実寸に当たるから、
  *
- *     深度 = 顔の中央の深度 + (z − z の中央) × Z / f
+ *     起伏 = (z − その場の大域の z) × Z / f
  *
  * とすればよい。当てはめる必要がそもそも無い。
  *
- * 大域（頭が空間のどこにあるか）は深度モデルのままにする。`referenceLevels`
- * で粗い層を固定し、顔モデルは細かい層だけに効かせる。
+ * **大域は足さない。** ここが v2.6.1 で直したところ（docs/09 §V13）。
+ * 以前はラプラシアンブレンドで landmark 面と深度モデルを混ぜ、粗い側の
+ * 1 層だけを深度モデルに固定していた。1024² の 6 段では、固定されるのは
+ * 波長 64px より粗い成分だけで、顔（幅 145px）の丸みはほぼ landmark 面に
+ * 置き換わる。ところが landmark 面はカメラを向いた面の統計的な型でしか
+ * なく、実測でこの二つは顔の中で **15mm** 食い違っていた（深度モデルの
+ * 顔の奥行きは 49mm、landmark 面は 17mm）。その食い違いが楕円の重みで
+ * 切られて、左頬が 7mm 手前へ、額が奥へ動く低周波のうねりになった。
+ * 顔の輪郭に沿った隆起として見える。
+ *
+ * landmark モデルが知っているのは**細部だけ**である。だから細部だけを
+ * 取り出して足す。半径 `trendRadius` の（重み付き）箱平均を大域とみなし、
+ * そこからの差だけを深度へ加える。こうすると足す量は作りからして
+ * 大域成分を持たないので、重みの羽根がどこを通っても輪ができない。
+ * 頭が空間のどこにあるか、顔がどれだけ丸いかは、これまでどおり深度
+ * モデルのものが残る。
  *
  * @param depth   融合済みの実寸深度（大きいほど奥）。破壊しない。
  * @param focalPx 作業グリッドでの焦点距離（画素）。
- * @param referenceLevels 粗い側の何層を深度モデルに固定するか。
  */
 export function applyFaceRelief(
   depth: ArrayLike<number>,
@@ -318,38 +361,37 @@ export function applyFaceRelief(
   width: number,
   height: number,
   focalPx: number,
-  levels = 6,
-  referenceLevels = 1,
 ): Float32Array {
-  const n = width * height;
-  if (surface.covered < 256 || focalPx <= 0) return Float32Array.from(depth);
+  const out = Float32Array.from(depth);
+  if (surface.covered < 256 || focalPx <= 0) return out;
 
-  // マスクの中の中央値。外れ値に振られないよう分位で取る。
+  // 顔がどれだけ遠いか。1 画素の実寸（Z / f）を出すためだけに要る。
+  // 外れ値に振られないよう中央値で取る。
   const bodyVals: number[] = [];
-  const faceVals: number[] = [];
   for (let y = 0; y < rect.height; y++) {
     const gy = rect.y + y;
     if (gy < 0 || gy >= height) continue;
     for (let x = 0; x < rect.width; x++) {
       const gx = rect.x + x;
       if (gx < 0 || gx >= width) continue;
-      const ti = y * rect.width + x;
-      if ((surface.weight[ti] as number) < 0.5) continue;
+      if ((surface.weight[y * rect.width + x] as number) < 0.5) continue;
       const v = depth[gy * width + gx] as number;
       if (Number.isFinite(v)) bodyVals.push(v);
-      faceVals.push(surface.depth[ti] as number);
     }
   }
-  if (bodyVals.length < 256) return Float32Array.from(depth);
+  if (bodyVals.length < 256) return out;
   bodyVals.sort((a, b) => a - b);
-  faceVals.sort((a, b) => a - b);
-  const medBody = bodyVals[bodyVals.length >> 1] as number;
-  const medFace = faceVals[faceVals.length >> 1] as number;
-  const perPixel = medBody / focalPx;
+  const perPixel = (bodyVals[bodyVals.length >> 1] as number) / focalPx;
 
-  const placed = Float32Array.from(depth);
-  const wFace = new Float32Array(n);
-  const wBody = new Float32Array(n).fill(1);
+  // landmark 面の大域。顔の外（重み 0）は混ぜない。
+  const trend = maskedBoxBlur(
+    surface.depth,
+    surface.weight,
+    rect.width,
+    rect.height,
+    surface.trendRadius,
+  );
+
   for (let y = 0; y < rect.height; y++) {
     const gy = rect.y + y;
     if (gy < 0 || gy >= height) continue;
@@ -359,11 +401,77 @@ export function applyFaceRelief(
       const ti = y * rect.width + x;
       const w = surface.weight[ti] as number;
       if (w <= 0) continue;
+      const relief = ((surface.depth[ti] as number) - (trend[ti] as number)) * perPixel;
       const gi = gy * width + gx;
-      placed[gi] = medBody + ((surface.depth[ti] as number) - medFace) * perPixel;
-      wFace[gi] = w;
-      wBody[gi] = 1 - w;
+      out[gi] = (depth[gi] as number) + w * relief;
     }
   }
-  return blendLaplacian([depth, placed], [wBody, wFace], width, height, levels, referenceLevels);
+  return out;
+}
+
+/**
+ * 重みのある画素だけを見る箱平均。窓を滑らせるので半径に依らず O(n)。
+ *
+ * 顔の外を 0 として混ぜると、楕円の縁で大域が 0 へ引っ張られ、そこに
+ * 偽の起伏ができる。数えるのは重みのある画素だけにする。
+ */
+function maskedBoxBlur(
+  src: Float32Array,
+  mask: Float32Array,
+  width: number,
+  height: number,
+  radius: number,
+): Float32Array {
+  const n = width * height;
+  const rowSum = new Float64Array(n);
+  const rowCount = new Float64Array(n);
+  for (let y = 0; y < height; y++) {
+    const row = y * width;
+    let sum = 0;
+    let count = 0;
+    for (let x = 0; x <= radius && x < width; x++) {
+      if ((mask[row + x] as number) <= 0) continue;
+      sum += src[row + x] as number;
+      count++;
+    }
+    for (let x = 0; x < width; x++) {
+      rowSum[row + x] = sum;
+      rowCount[row + x] = count;
+      const add = x + radius + 1;
+      if (add < width && (mask[row + add] as number) > 0) {
+        sum += src[row + add] as number;
+        count++;
+      }
+      const drop = x - radius;
+      if (drop >= 0 && (mask[row + drop] as number) > 0) {
+        sum -= src[row + drop] as number;
+        count--;
+      }
+    }
+  }
+
+  const out = new Float32Array(n);
+  for (let x = 0; x < width; x++) {
+    let sum = 0;
+    let count = 0;
+    for (let y = 0; y <= radius && y < height; y++) {
+      sum += rowSum[y * width + x] as number;
+      count += rowCount[y * width + x] as number;
+    }
+    for (let y = 0; y < height; y++) {
+      const i = y * width + x;
+      out[i] = count > 0 ? sum / count : (src[i] as number);
+      const add = y + radius + 1;
+      if (add < height) {
+        sum += rowSum[add * width + x] as number;
+        count += rowCount[add * width + x] as number;
+      }
+      const drop = y - radius;
+      if (drop >= 0) {
+        sum -= rowSum[drop * width + x] as number;
+        count -= rowCount[drop * width + x] as number;
+      }
+    }
+  }
+  return out;
 }
