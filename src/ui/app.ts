@@ -112,6 +112,38 @@ async function ensureViewer(): Promise<Viewer> {
   return viewer;
 }
 
+/**
+ * 推論バックエンドで一度失敗したら、WASM でやり直す（v2.6、実機で判明）。
+ *
+ * WebGPU の実装差で、あるモデルのシェーダが弾かれることがある。ORT の
+ * WebGPU バックエンドはセッションをまたいで 1 つなので、そこで壊れると
+ * **次のモデルが無関係な例外で落ちる**。実機では u2netp の fp16 が
+ * 「'f16' type used without 'f16' extension enabled」で無効なシェーダを
+ * 作り、その後の DA3 が
+ *
+ *     kernel "[Resize] /backbone/Resize" is not allowed to be called recursively
+ *
+ * で落ちた。落ちる場所と原因が離れるので、利用者には何も分からない。
+ *
+ * 原因側（f16 を要求しない変種を配る）は直したが、端末ごとの WebGPU の
+ * 差を全部見切ることはできない。**遅くても結果が出る**ほうを選ぶ。
+ * WASM 経路は同じモデルを uint8 で回すので、絵は出る。
+ */
+async function withInferenceFallback<T>(
+  first: Backend,
+  attempt: (backend: Backend) => Promise<T>,
+): Promise<T> {
+  try {
+    return await attempt(first);
+  } catch (e) {
+    if (first === 'wasm') throw e;
+    // 何が起きたかは残す。黙って遅くなると、原因を追う手がかりが消える。
+    console.warn('[photosplat] WebGPU での推論に失敗したので WASM でやり直します', e);
+    setProgress(0, 'WebGPU で失敗したため、互換モード（WASM）でやり直しています');
+    return await attempt('wasm');
+  }
+}
+
 async function run(file: File): Promise<void> {
   if (state.busy) return;
   state.busy = true;
@@ -131,13 +163,14 @@ async function run(file: File): Promise<void> {
     // 表示したいので、ここで作っておかないと最初の1枚を捨てることになる。
     const viewer = await ensureViewer();
 
-    const result = await generate(file, {
+    const result = await withInferenceFallback(inferenceBackend(cap), (backend) =>
+      generate(file, {
       mode: currentMode(),
       grid: preset.grid,
       reduction: preset.reduction,
       inpaint: preset.inpaint,
       depthTiles: preset.depthTiles,
-      backend: inferenceBackend(cap),
+      backend,
       // shader-f16 が無い WebGPU では q4f16 のモデルが黙って壊れる。
       // その場合は uint8 側を落とす（modelCatalog の manifestBackendKey）。
       shaderF16: cap.shaderF16,
@@ -153,7 +186,8 @@ async function run(file: File): Promise<void> {
         viewer.resize();
         viewer.setSplats(b.data, b.count, b.nearZ, b.farZ);
       },
-    });
+      }),
+    );
     state.result = result;
 
     show('view');

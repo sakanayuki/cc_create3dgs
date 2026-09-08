@@ -202,6 +202,24 @@ def check_registry_contract() -> bool:
         # 役割ごとの指標があること。無いと calibrate.py が KeyError で落ちる。
         ok &= check(f"role に指標がある {m.id} ({m.role})", m.role in cal.METRICS)
 
+    # 決定 D22 の不変条件: wasm 変種は f16 を要求してはいけない。
+    #
+    # この変種は WASM 経路だけでなく **shader-f16 が無い WebGPU** の受け皿も
+    # 兼ねる（modelCatalog の manifestBackendKey が webgpu → wasm に落とす）。
+    # fp16 を渡すと WGSL が「'f16' type used without 'f16' extension enabled」で
+    # 弾かれ、シェーダモジュールが無効になる。そこで止まらず、壊れた
+    # パイプラインのまま次のモデルへ進み、**別のモデル**が
+    # 「kernel ... is not allowed to be called recursively」で落ちる。
+    # 落ちる場所と原因が離れるので、実機でも原因にたどり着きにくい。
+    needs_f16 = {"fp16", "q4f16"}
+    for m in reg.models.values():
+        mode = m.modes_by_backend(reg.backend_defaults).get("wasm", "")
+        ok &= check(
+            f"wasm 変種が f16 を要求しない {m.id}",
+            mode not in needs_f16,
+            "" if mode not in needs_f16 else f"wasm={mode} は shader-f16 の無い WebGPU で壊れる",
+        )
+
     # スクリプトが raw["hf"] を直接触っていないこと（置き場所の知識を散らさない）
     here = Path(__file__).parent
     leaks = []

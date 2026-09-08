@@ -195,13 +195,13 @@
       ],
       "preprocess": "imagenet",
       "quantization": {
-        "mode": "fp16",
+        "mode": "none",
         "byBackend": {
-          "webgpu": "fp16",
-          "wasm": "fp16"
+          "webgpu": "none",
+          "wasm": "none"
         }
       },
-      "expectedBytes": 2400000,
+      "expectedBytes": 4600000,
       "sizeTolerance": 0.25,
       "notes": [
         "MODNet だけだと、床に座る人物で敷物を被写体に含めてしまう（実写で α=254、",
@@ -212,7 +212,27 @@
         "uint8 量子化は使えない。出力が飽和して全画素が被写体になる（実測）。fp16 は",
         "fp32 と同じ結果で 2.26 MB に収まるので、両バックエンドとも fp16 にする。",
         "重みは U²-Net（Apache-2.0）。配布は rembg（MIT）の GitHub リリース。",
-        "HF に同じファイル（SHA256 一致）があるが、そちらはライセンス表記が無いので使わない。"
+        "HF に同じファイル（SHA256 一致）があるが、そちらはライセンス表記が無いので使わない。",
+        "",
+        "**shader-f16 が無い WebGPU** の受け皿も兼ねる（modelCatalog の",
+        "manifestBackendKey が webgpu → wasm に落とす）。fp16 を渡すと WGSL が",
+        "「'f16' type used without 'f16' extension enabled」で弾かれ、シェーダ",
+        "モジュールが無効になる。そこで止まらず、壊れたパイプラインのまま",
+        "次のモデルに進み、DA3 が「kernel ... is not allowed to be called",
+        "recursively」で落ちる。実機で再現済み。",
+        "uint8 は精度が持たないので、非 f16 側は fp32（none）で配る。",
+        "",
+        "**このモデルは WebGPU に載せない（v2.6、実機で判明）。**",
+        "ORT の WebGPU バックエンドはセッションをまたいで 1 つしかない。ここで",
+        "推論が例外で終わると、内部の currentKernelId が立ったまま残り、",
+        "**次に走る別のモデル**が「kernel ... is not allowed to be called",
+        "recursively」で落ちる。実機では u2netp の直後に DA3 が落ち、原因と",
+        "現象が離れるので追えなかった。この 2 つを外すと WebGPU は完走する。",
+        "",
+        "どちらも小さい（320² と 256²）ので WASM で回しても待ち時間に響かない。",
+        "重い DA3・MODNet・MI-GAN は WebGPU のままにする。",
+        "量子化は fp32（none）。uint8 は u2netp で出力が飽和し、face-mesh では",
+        "座標が平均 3.7 画素・最大 16.1 画素ずれて使えない。"
       ]
     },
     "isnet-general": {
@@ -336,12 +356,12 @@
         256
       ],
       "layout": "NHWC",
-      "expectedBytes": 2600000,
+      "expectedBytes": 5200000,
       "quantization": {
-        "mode": "fp16",
+        "mode": "none",
         "byBackend": {
-          "webgpu": "fp16",
-          "wasm": "fp16"
+          "webgpu": "none",
+          "wasm": "none"
         }
       },
       "notes": [
@@ -361,7 +381,27 @@
         "SHA256 を固定している。",
         "",
         "uint8 量子化はしない。u2netp で出力が飽和して壊れた前例があり、座標を返す",
-        "モデルは量子化誤差がそのまま位置ずれになる。"
+        "モデルは量子化誤差がそのまま位置ずれになる。",
+        "",
+        "**shader-f16 が無い WebGPU** の受け皿も兼ねる（modelCatalog の",
+        "manifestBackendKey が webgpu → wasm に落とす）。fp16 を渡すと WGSL が",
+        "「'f16' type used without 'f16' extension enabled」で弾かれ、シェーダ",
+        "モジュールが無効になる。そこで止まらず、壊れたパイプラインのまま",
+        "次のモデルに進み、DA3 が「kernel ... is not allowed to be called",
+        "recursively」で落ちる。実機で再現済み。",
+        "uint8 は精度が持たないので、非 f16 側は fp32（none）で配る。",
+        "",
+        "**このモデルは WebGPU に載せない（v2.6、実機で判明）。**",
+        "ORT の WebGPU バックエンドはセッションをまたいで 1 つしかない。ここで",
+        "推論が例外で終わると、内部の currentKernelId が立ったまま残り、",
+        "**次に走る別のモデル**が「kernel ... is not allowed to be called",
+        "recursively」で落ちる。実機では u2netp の直後に DA3 が落ち、原因と",
+        "現象が離れるので追えなかった。この 2 つを外すと WebGPU は完走する。",
+        "",
+        "どちらも小さい（320² と 256²）ので WASM で回しても待ち時間に響かない。",
+        "重い DA3・MODNet・MI-GAN は WebGPU のままにする。",
+        "量子化は fp32（none）。uint8 は u2netp で出力が飽和し、face-mesh では",
+        "座標が平均 3.7 画素・最大 16.1 画素ずれて使えない。"
       ]
     }
   }

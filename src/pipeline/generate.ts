@@ -148,6 +148,23 @@ async function loadModel(
   throw new Error(`${id} を読み込めませんでした:\n${errors.join('\n')}`);
 }
 
+/**
+ * 補助モデル（u2netp / face-mesh）は必ず WASM で回す（v2.6、実機で判明）。
+ *
+ * ORT の WebGPU バックエンドはセッションをまたいで 1 つしかない。そこで
+ * 推論が例外で終わると内部の `currentKernelId` が立ったまま残り、**次に走る
+ * 別のモデル**が
+ *
+ *     kernel "[Resize] /backbone/Resize" is not allowed to be called recursively
+ *
+ * で落ちる。原因と現象が別のモデルに分かれるので、実機のログからは追えない。
+ * 実際、この 2 つを外すと WebGPU は完走した。
+ *
+ * どちらも小さい（320² と 256²）ので、WASM で回しても待ち時間に響かない。
+ * 重い DA3・MODNet・MI-GAN は WebGPU のままにする。
+ */
+const AUX_BACKEND: Backend = 'wasm';
+
 /** セッションの入力名は1つとは限らないので、最初の1つに入れる。 */
 function feedOf(session: ort.InferenceSession, tensor: ort.Tensor): Record<string, ort.Tensor> {
   const name = session.inputNames[0];
@@ -287,7 +304,7 @@ async function runMatte(
   try {
     const u2 = await loadModel(
       'u2netp',
-      backend,
+      AUX_BACKEND,
       { repo: 'tomjackson2023/rembg', file: 'u2netp.onnx' },
       shaderF16,
     );
@@ -394,7 +411,7 @@ async function applyFaceDepth(
   try {
     session = await loadModel(
       'face-mesh',
-      backend,
+      AUX_BACKEND,
       { repo: 'astaileyyoung/FaceMeshONNX', file: 'mesh.onnx' },
       shaderF16,
     );
