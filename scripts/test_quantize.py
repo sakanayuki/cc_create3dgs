@@ -173,31 +173,48 @@ def check_rank_handling(d: Path) -> bool:
     return ok
 
 
-def check_raw_paths() -> bool:
-    """registry の全モデルで、`raw_path` が fetch_models.py の置き場所と一致するか。
+def check_registry_contract() -> bool:
+    """registry の全モデルが、スクリプトの前提を満たすか。
 
-    deploy #? で落ちた: `raw_path` が HF のファイル名だけを取っていて、
-    `onnx/model.onnx` の `onnx/` が消えていた。`hf_hub_download(local_dir=...)`
-    はリポジトリ内の相対パスをそのまま再現するので、実際は `onnx/` の下に
-    置かれる。DA3 と ISNet だけが「元モデルが見つかりません」で落ち、
-    ディレクトリを持たない mi-gan と、量子化済みを流用する modnet は
-    通ってしまうので、気づきにくい壊れ方をした。
+    ここは**本物のモデルを 1 つも要らない**検査で、重い取得と量子化の前に
+    走る。実際に落ちた 2 件はどちらも「モデルが増えたら壊れる前提」だった。
 
-    ここは registry を読むだけで済む検査なので、本物のモデルは要らない。
+      ・quantize.py が raw["hf"]["file"] のファイル名だけを見ていて、
+        `onnx/model.onnx` の `onnx/` が消えた（DA3 と ISNet が見つからない）
+      ・calibrate.py が raw["hf"] を直接読んでいて、URL から取るモデル
+        （u2netp / face-mesh）で KeyError
+
+    どちらもレジストリを 1 行足しただけで壊れ、CI の後半まで気づけなかった。
     """
+    import calibrate as cal
+
     from _registry import Registry
 
     reg = Registry.load()
     root = Path("/tmp/raw")
     ok = True
     for m in reg.models.values():
+        # 元モデルの置き場所は Model だけが知っている（fetch_models.py と一致）
         got = m.raw_path(root)
-        if m.url:
-            want = root / m.id / Path(m.url).name
-        else:
-            # fetch_models.py: hf_hub_download(filename=rel, local_dir=out/id)
-            want = root / m.id / m.raw["hf"]["file"]
+        want = root / m.id / (Path(m.url).name if m.url else m.raw["hf"]["file"])
         ok &= check(f"raw_path {m.id}", got == want, "" if got == want else f"{got} ≠ {want}")
+
+        # 役割ごとの指標があること。無いと calibrate.py が KeyError で落ちる。
+        ok &= check(f"role に指標がある {m.id} ({m.role})", m.role in cal.METRICS)
+
+    # スクリプトが raw["hf"] を直接触っていないこと（置き場所の知識を散らさない）
+    here = Path(__file__).parent
+    leaks = []
+    for f in sorted(here.glob("*.py")):
+        if f.name in {"_registry.py", "test_quantize.py"}:
+            continue
+        # コメントは除いて見る。「触ってはいけない」と書いた文まで拾わない。
+        code = "\n".join(
+            line.split("#", 1)[0] for line in f.read_text(encoding="utf-8").splitlines()
+        )
+        if '["hf"]' in code:
+            leaks.append(f.name)
+    ok &= check("raw['hf'] を直接読むスクリプトが無い", not leaks, ", ".join(leaks))
     return ok
 
 
@@ -281,7 +298,7 @@ def main() -> int:
 
         passed &= check_rank_handling(d)
         passed &= check_multi_input(d)
-        passed &= check_raw_paths()
+        passed &= check_registry_contract()
 
         # 壊れたファイルを見逃さないこと
         bad = d / "broken.onnx"

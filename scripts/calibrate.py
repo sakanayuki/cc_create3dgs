@@ -26,6 +26,9 @@ THRESHOLDS: dict[str, dict[str, float]] = {
     "depth": {"max_absRel": 0.02, "min_delta105": 0.97},
     "matte": {"min_iou": 0.985, "max_boundaryMae": 4 / 255},
     "inpaint": {"min_psnr": 32.0},
+    # 座標の 1 画素は 256² の入力での 1 画素。顔の幅がおよそ 150 画素なので、
+    # 0.5 画素も動けば形が変わる。実測（fp16）は最大 0.06 画素だった。
+    "face": {"max_landmarkMae": 0.1, "max_landmarkMax": 0.5},
 }
 
 
@@ -88,6 +91,11 @@ def preprocess(img01: np.ndarray, role: str, dtype: Any) -> np.ndarray:
     return img01
 
 
+def to_nhwc(x: np.ndarray) -> np.ndarray:
+    """NCHW を NHWC にする。顔の landmark モデルはこちらを取る。"""
+    return np.transpose(x, (0, 2, 3, 1))
+
+
 def make_feed(sess: ort.InferenceSession, img01: np.ndarray, role: str) -> dict[str, np.ndarray]:
     """モデルが要求する入力を全部埋める。
 
@@ -106,7 +114,14 @@ def make_feed(sess: ort.InferenceSession, img01: np.ndarray, role: str) -> dict[
             mask[..., h // 4 : 3 * h // 4, w // 4 : 3 * w // 4] = 0
             feed[inp.name] = fit_rank(mask, rank).astype(dtype)
         else:
-            feed[inp.name] = fit_rank(preprocess(img01, role, dtype), rank).astype(dtype)
+            x = preprocess(img01, role, dtype)
+            # 入力の形で並びを決める。名前や役割で決め打ちにすると、
+            # モデルが増えるたびに分岐が増える。
+            shape = list(inp.shape or [])
+            if len(shape) == 4 and shape[-1] == 3:
+                feed[inp.name] = to_nhwc(x).astype(dtype)
+            else:
+                feed[inp.name] = fit_rank(x, rank).astype(dtype)
     return feed
 
 
@@ -154,7 +169,26 @@ def metrics_inpaint(ref: np.ndarray, got: np.ndarray) -> dict[str, float]:
     return {"psnr": psnr}
 
 
-METRICS = {"depth": metrics_depth, "matte": metrics_matte, "inpaint": metrics_inpaint}
+def metrics_face(ref: np.ndarray, got: np.ndarray) -> dict[str, float]:
+    """landmark の座標のずれ（入力画素）。
+
+    顔モデルが返すのは画像ではなく 478 点の座標なので、画素どうしを
+    比べる指標は当てはまらない。量子化で座標が動くと、そのまま顔の形の
+    ずれになる。実測では fp16 と fp32 の差は最大 0.06 画素だった。
+    """
+    r = ref.ravel().astype(np.float64)
+    g = got.ravel().astype(np.float64)
+    n = min(r.size, g.size)
+    d = np.abs(r[:n] - g[:n])
+    return {"landmarkMae": float(d.mean()), "landmarkMax": float(d.max())}
+
+
+METRICS = {
+    "depth": metrics_depth,
+    "matte": metrics_matte,
+    "inpaint": metrics_inpaint,
+    "face": metrics_face,
+}
 
 
 def evaluate(m: Model, ref_path: Path, test_path: Path, images: list[np.ndarray]) -> dict[str, Any]:
@@ -163,7 +197,7 @@ def evaluate(m: Model, ref_path: Path, test_path: Path, images: list[np.ndarray]
     ref_sess = ort.InferenceSession(str(ref_path), opts, providers=["CPUExecutionProvider"])
     test_sess = ort.InferenceSession(str(test_path), opts, providers=["CPUExecutionProvider"])
 
-    fn = METRICS[m.role]
+    fn = METRICS[m.role]  # 役割は check_roles_have_metrics（test_quantize.py）が保証する
     acc: dict[str, list[float]] = {}
     for x in images:
         got = fn(run(ref_sess, x, m.role), run(test_sess, x, m.role))
@@ -246,7 +280,10 @@ def main() -> int:
         if not (args.raw and args.models):
             ap.error("--raw と --models、または --compare を指定してください")
         for m in reg.models_for_profile():
-            ref = args.raw / m.id / m.raw["hf"]["file"]
+            # 置き場所を知っているのは Model だけ。ここで raw["hf"] を直接
+            # 読むと、URL から取るモデル（u2netp / face-mesh）で KeyError に
+            # なる。同じ形の間違いを quantize.py でもやった。
+            ref = m.raw_path(args.raw)
             test = args.models / f"{m.id}.{m.quant_mode}.onnx"
             if not (ref.exists() and test.exists()):
                 print(f"[calibrate] スキップ {m.id}（モデルが見つかりません）")
