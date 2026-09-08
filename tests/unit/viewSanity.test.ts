@@ -15,7 +15,7 @@ import { estimateNormals, pullBoundaryDepthInward } from '../../src/pipeline/3-c
 import { thicknessMap } from '../../src/pipeline/4-shell';
 import { buildSplats, DEFAULT_BUILD_PARAMS } from '../../src/pipeline/6-splats';
 import { adaptiveSample, SAMPLING_PRESETS } from '../../src/pipeline/7-sample';
-import { decodeSplats, viewMetrics } from '../helpers/splatView';
+import { decodeSplats, depthToWidth, viewMetrics } from '../helpers/splatView';
 
 const S = 160;
 const FOCAL = 200;
@@ -196,6 +196,17 @@ describe('斜めから見たときの健全性（v2.3、実写での破綻にも
       if (pulled[i] !== u16[i]) touched++;
     }
     expect(touched).toBe(0);
+  });
+
+  it('奥行きが幅に対して人間離れしていない（v2.4、他実装との比較で追加）', () => {
+    // 他実装の理想的な出力を解析すると 奥行き ÷ 幅 = 0.895 だった。
+    // 私たちの出力は 1.90 で、体が視線方向に 2 倍伸びており、少し回すだけで
+    // 串のように崩れていた。この指標は連結性でも穴率でも捕まらない。
+    const { depth, color, alpha } = capsule();
+    const b = build(depth, color, alpha);
+    const r = depthToWidth(b.data, b.count);
+    expect(r, `奥行き ÷ 幅 = ${r.toFixed(3)}`).toBeGreaterThan(0.4);
+    expect(r, `奥行き ÷ 幅 = ${r.toFixed(3)}`).toBeLessThan(1.4);
   });
 
   it('引き込む先が無いほど細い被写体では何もしない', () => {

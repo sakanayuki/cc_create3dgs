@@ -145,6 +145,68 @@ describe('2パス融合', () => {
     expect(subjectOnly.fits[0]!.rmse).toBeLessThan(withBg.fits[0]!.rmse);
   });
 
+  it('タイルは細部だけを担当し、体全体の形は変えない（v2.4、他実装との比較で判明）', () => {
+    // タイルは全体パスと違う切り出し方で推論されるので、低周波（＝体全体の
+    // 形）が一致しない。そこを混ぜると食い違いがそのまま奥行きの歪みになる。
+    // 実写では 奥行き ÷ 身長 を 0.506 → 0.760 と 50% 膨らませていた。
+    const global = ramp();
+    const rect = { x: 8, y: 8, width: 48, height: 48 };
+    const depth = new Float32Array(rect.width * rect.height);
+    const alpha = new Uint8Array(S * S);
+    for (let y = 0; y < rect.height; y++) {
+      for (let x = 0; x < rect.width; x++) {
+        const gi = (rect.y + y) * S + (rect.x + x);
+        alpha[gi] = 255;
+        // 全体パスに、大きくずれた低周波（傾き）と、細かい起伏を足したもの
+        const low = 0.25 * (x / rect.width);
+        const fine = 0.02 * Math.sin(x * 1.3) * Math.cos(y * 1.3);
+        depth[y * rect.width + x] = (global[gi] as number) + low + fine;
+      }
+    }
+    const tile = { depth, rect };
+    const opts = { ...DEFAULT_FUSE_PARAMS, feather: 2, subject: alpha };
+
+    const wide = fuseDepth(global, [tile], S, S, { ...opts, detailScalePx: 0 });
+    const narrow = fuseDepth(global, [tile], S, S, { ...opts, detailScalePx: 8 });
+
+    /** 帯の中での低周波のずれ（＝体全体の形の歪み）。 */
+    const lowDrift = (d: ArrayLike<number>): number => {
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (let y = 16; y < 48; y++) {
+        for (let x = 16; x < 48; x++) {
+          const gi = y * S + x;
+          const v = (d[gi] as number) - (global[gi] as number);
+          if (v < lo) lo = v;
+          if (v > hi) hi = v;
+        }
+      }
+      return hi - lo;
+    };
+    // 細部だけに絞ると、大域のずれが小さくなる
+    expect(lowDrift(narrow.depth)).toBeLessThan(lowDrift(wide.depth) * 0.7);
+
+    /** 細かい起伏がちゃんと入っているか。 */
+    const fineEnergy = (d: ArrayLike<number>): number => {
+      let s = 0;
+      let n = 0;
+      for (let y = 17; y < 47; y++) {
+        for (let x = 17; x < 47; x++) {
+          const gi = y * S + x;
+          const lap =
+            4 * (d[gi] as number) -
+            (d[gi - 1] as number) - (d[gi + 1] as number) -
+            (d[gi - S] as number) - (d[gi + S] as number);
+          s += lap * lap;
+          n++;
+        }
+      }
+      return Math.sqrt(s / n);
+    };
+    // 細部は失わない（むしろ低周波に埋もれなくなる）
+    expect(fineEnergy(narrow.depth)).toBeGreaterThan(fineEnergy(wide.depth) * 0.8);
+  });
+
   it('タイルのスケールを全体に合わせる', () => {
     const { global, tile } = scenario();
     const { fits } = fuseDepth(global, [tile], S, S, { ...DEFAULT_FUSE_PARAMS, feather: 4 });

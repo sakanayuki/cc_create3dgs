@@ -53,8 +53,10 @@ export interface CalibrationResult {
   readonly silhouetteSamples: number;
   /** 実寸をそのまま使ったか（DA3 経路で ratio 未指定のとき true）。 */
   readonly metric: boolean;
-  /** 被写体の 奥行き ÷ 高さ。人物なら 0.3〜0.8 が自然。診断に出す。 */
+  /** 被写体の 奥行き ÷ 高さ。構図で変わるので診断用。 */
   readonly depthToHeight: number;
+  /** 被写体の 奥行き ÷ 幅（短辺）。人物なら 0.9 前後が自然。妥当性はこれで見る。 */
+  readonly depthToWidth: number;
 }
 
 const SUBJECT_THRESHOLD = 128;
@@ -65,13 +67,33 @@ const DEFAULT_RELIEF_BOOST = 3;
 const DEFAULT_RELIEF_RADIUS = 0.04;
 
 /**
- * 被写体の「奥行き ÷ 高さ」として許す範囲。
+ * 被写体の「奥行き ÷ 幅（短辺）」として許す範囲（v2.4、他実装との比較で改訂）。
  *
- * 人物なら 0.3〜0.8 に収まる。これを大きく外れるときはモデルの実寸が
- * 当てにならないので、範囲内へ引き戻す。実測では、外れ値を切らないと
- * 1.47（高さより奥行きが大きい）になり、髪が後ろへ長く尾を引いていた。
+ * **高さではなく幅で見る。** 奥行き ÷ 高さは構図で大きく変わる（全身なら
+ * 0.35 前後、バストアップなら 1 に近づく）ので、一つの範囲では縛れない。
+ * 一方、人はどこを切っても「幅とおおよそ同じだけ奥行きがある」。実測でも
+ * 頭 0.69 / 胸 0.77 / 腰 0.91 と安定していた。
+ *
+ * 理想的な出力（別実装の結果）を解析すると、全体で 奥行き ÷ 幅 = 0.895
+ * だった。私たちの出力は 1.90 で、体が視線方向に 2 倍伸びていた。少し
+ * 回すだけで串のように崩れるのはこれが原因である。
+ *
+ * DA3 の実寸は**絶対値としては当てにならない**。この画像では、こちらの
+ * 加工を一切かけない生の実寸ですら 奥行き ÷ 身長 が 0.506（理想 0.356）
+ * と 1.4 倍あった。形の相対関係は使い、全体の伸びだけをここで抑える。
+ *
+ * 上限を 0.85 に置くのは、この後に背面シェルが厚みを上乗せするため。
+ * 厚み 0.12 で 0.04 ほど足されるので、点群としては 0.9 前後に着地する。
+ * 実測ではどの写真でも上限に張り付くので、事実上「妥当な奥行きへ
+ * 正規化する」処理になっている。実寸を信じきれない以上それが正しい。
  */
-const PLAUSIBLE_DEPTH_TO_HEIGHT = { min: 0.15, max: 0.9 } as const;
+const PLAUSIBLE_DEPTH_TO_WIDTH = { min: 0.40, max: 0.85 } as const;
+
+/** 被写体内の頑健な奥行き幅（p1..p99）。強調の前後で比べるのに使う。 */
+function subjectExtent(values: ArrayLike<number>, alpha: ArrayLike<number>): number {
+  const [lo, hi] = percentileOfSubject(values, alpha, [0.01, 0.99]) as [number, number];
+  return hi - lo;
+}
 
 /** 被写体領域のパーセンタイル値を返す。マットの縁の外れ値を避けるため。 */
 function percentileOfSubject(
@@ -502,9 +524,10 @@ export function calibrate(input: CalibrationInput): CalibrationResult {
 
   // --- ③ 局所の起伏を持ち上げる
   //
-  // 大域の形は平滑化した成分が持つので比率は変わらず、上がるのは
-  // 顔の凹凸や服のしわだけ。
+  // 上がるのは顔の凹凸や服のしわだけ。大域の形（＝体の奥行きの比率）は
+  // 変えない。
   const radius = Math.max(1, Math.round(shortSide * reliefRadius));
+  const beforeBoost = subjectExtent(z, alpha);
   z = enhanceRelief(z, alpha, width, height, radius, boost);
 
   // 強調は「平滑化からのずれ」を倍にするので、切り残した外れ値も倍になる。
@@ -516,6 +539,24 @@ export function calibrate(input: CalibrationInput): CalibrationResult {
     for (let i = 0; i < z.length; i++) {
       const v = z[i] as number;
       z[i] = v < bLo ? bLo : v > bHi ? bHi : v;
+    }
+
+    // 強調のぶん広がった奥行きを、元の幅へ戻す。
+    //
+    // 「大域は平滑化成分が持つので比率は変わらない」と書いていたが、実測
+    // では変わっていた。持ち上げた帯は極値の側にも足されるので、全体の幅が
+    // 広がる。実写では 奥行き÷身長 が 0.539 → 0.721（+34%）になっていた。
+    // 体が奥へ伸びると、少し回しただけで串のように崩れる。
+    //
+    // 幅を戻すと局所の起伏も同じ率で縮むが、**まわりに対する比**は上がった
+    // ままである。欲しいのはその比であって、絶対の奥行きではない。
+    const afterBoost = subjectExtent(z, alpha);
+    if (afterBoost > 1e-9 && beforeBoost > 1e-9) {
+      const k = beforeBoost / afterBoost;
+      if (k < 1) {
+        const mid = percentileOfSubject(z, alpha, [0.5])[0] as number;
+        for (let i = 0; i < z.length; i++) z[i] = ((z[i] as number) - mid) * k + mid;
+      }
     }
   }
 
@@ -530,18 +571,20 @@ export function calibrate(input: CalibrationInput): CalibrationResult {
   // 上限 0.9 で頭打ちになり、立体感スライダが効かなくなる。
   const medianZ = percentileOfSubject(z, alpha, [0.5])[0] as number;
   const worldHeight = (boxHeight / focalPx) * Math.max(medianZ, 1e-6);
-  let [lo, hi] = percentileOfSubject(z, alpha, [0.0, 1.0]) as [number, number];
-  const ratioNow = worldHeight > 0 ? (hi - lo) / worldHeight : 0;
+  const worldWidth = (shortSide / focalPx) * Math.max(medianZ, 1e-6);
+  // 外れ値で範囲が決まらないよう、頑健な幅で見る。
+  let [lo, hi] = percentileOfSubject(z, alpha, [0.01, 0.99]) as [number, number];
+  const widthRatioNow = worldWidth > 0 ? (hi - lo) / worldWidth : 0;
 
-  if (metric && ratioNow > 0) {
-    const clampedRatio = Math.min(
-      PLAUSIBLE_DEPTH_TO_HEIGHT.max,
-      Math.max(PLAUSIBLE_DEPTH_TO_HEIGHT.min, ratioNow),
+  if (metric && widthRatioNow > 0) {
+    const clamped = Math.min(
+      PLAUSIBLE_DEPTH_TO_WIDTH.max,
+      Math.max(PLAUSIBLE_DEPTH_TO_WIDTH.min, widthRatioNow),
     );
-    if (clampedRatio !== ratioNow) {
-      const k = clampedRatio / ratioNow;
+    if (clamped !== widthRatioNow) {
+      const k = clamped / widthRatioNow;
       for (let i = 0; i < z.length; i++) z[i] = ((z[i] as number) - medianZ) * k + medianZ;
-      [lo, hi] = percentileOfSubject(z, alpha, [0.0, 1.0]) as [number, number];
+      [lo, hi] = percentileOfSubject(z, alpha, [0.01, 0.99]) as [number, number];
     }
   }
 
@@ -563,7 +606,8 @@ export function calibrate(input: CalibrationInput): CalibrationResult {
     shift,
     silhouetteSamples: 0,
     metric,
-    depthToHeight: worldHeight > 0 ? span / worldHeight : 0,
+    depthToHeight: worldHeight > 0 ? (hi - lo) / worldHeight : 0,
+    depthToWidth: worldWidth > 0 ? (hi - lo) / worldWidth : 0,
   };
 }
 

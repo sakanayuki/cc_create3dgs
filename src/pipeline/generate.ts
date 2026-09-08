@@ -69,6 +69,16 @@ export interface GenerateOptions {
   readonly depthTiles?: boolean;
 }
 
+/**
+ * 背面シェルの厚み（正規化深度に対する割合）。
+ *
+ * 0.35 だと前面と背面の隔たりが中央値 0.127 になり、点群の 奥行き ÷ 幅 を
+ * 0.12 も押し上げていた。理想的な出力（別実装）は隔たり 0.012 で、ほぼ
+ * 一枚の面である。半球カバー（決定 D2）のために厚みは要るが、この量は
+ * 過大だった。0.12 で隔たり 0.051 になり、紙のようには見えない。
+ */
+const BACK_SHELL_THICKNESS = 0.12;
+
 export const DEFAULT_GENERATE_OPTIONS: Omit<GenerateOptions, 'backend'> = {
   mode: 'person',
   grid: WORKING_GRID,
@@ -93,8 +103,10 @@ export interface GenerateResult {
     readonly intrinsicsFromModel: boolean;
     /** 実寸をそのまま使ったか。false なら比率を指定して引き伸ばしている。 */
     readonly metricDepth: boolean;
-    /** 被写体の 奥行き ÷ 高さ。人物なら 0.3〜0.8 が自然。 */
+    /** 被写体の 奥行き ÷ 高さ。構図で変わるので参考値。 */
     readonly depthToHeight: number;
+    /** 被写体の 奥行き ÷ 幅。人物なら 0.9 前後が自然。妥当性はこれで見る。 */
+    readonly depthToWidth: number;
     /** 深度タイルパスで実際に使えたタイル数（0 なら全体パスのみ）。 */
     readonly depthTiles: number;
     /** ⑧ で何を使ったか。mi-gan が本命、stretch は縮退、skipped は段差なし。 */
@@ -401,6 +413,8 @@ async function runDepthTiles(
     globalWeight: 0.15,
     // 尺度合わせは被写体の中だけで行う。背景を混ぜると倍率が壊れる。
     subject: alpha,
+    // タイルは細部だけを担当し、体全体の形は全体パスに任せる。
+    detailScalePx: 16,
   });
   return { depth: fused.depth, tiles: tiles.length };
 }
@@ -578,7 +592,7 @@ export async function generate(photo: Blob, options: GenerateOptions): Promise<G
 
   report(0.9, '厚みをつけています');
   const thickness = await mark('厚みマップ', () =>
-    thicknessMap(alpha, grid, grid, { maxThickness: 0.35, profile: 'ellipsoid' }),
+    thicknessMap(alpha, grid, grid, { maxThickness: BACK_SHELL_THICKNESS, profile: 'ellipsoid' }),
   );
 
   const buildParams: BuildParams = { ...DEFAULT_BUILD_PARAMS, ...opts.params };
@@ -632,6 +646,7 @@ export async function generate(photo: Blob, options: GenerateOptions): Promise<G
       intrinsicsFromModel: depthOut.focalPx !== null,
       metricDepth: calibrated.metric,
       depthToHeight: calibrated.depthToHeight,
+      depthToWidth: calibrated.depthToWidth,
       depthTiles: tileCount,
       inpaint: inpaintUsed,
     },

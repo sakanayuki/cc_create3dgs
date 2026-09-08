@@ -172,7 +172,7 @@ async function run(file: File): Promise<void> {
        </div>
        <p class="note">焦点距離 ${result.stats.focalPx.toFixed(0)} px（${
          result.stats.intrinsicsFromModel ? 'モデルの推定値' : '画角 55° の仮定'
-       }） / 奥行き÷高さ ${result.stats.depthToHeight.toFixed(2)}${
+       }） / 奥行き÷幅 ${result.stats.depthToWidth.toFixed(2)}（人物は 0.9 前後）/ 奥行き÷高さ ${result.stats.depthToHeight.toFixed(2)}${
          result.stats.metricDepth ? '（実寸）' : '（比率指定）'
        } / 深度タイル ${result.stats.depthTiles} 枚 / 遮蔽部の補完: ${
          { 'mi-gan': 'MI-GAN', stretch: '引き伸ばし（縮退）', skipped: '不要' }[result.stats.inpaint]

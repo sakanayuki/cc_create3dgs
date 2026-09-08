@@ -431,7 +431,7 @@ describe('実寸と局所起伏（v2.2、実写での測定にもとづく）', 
     expect(detail(boosted)).toBeGreaterThan(detail(flat) * 1.5);
   });
 
-  it('奥行きが高さに対して人間離れしていたら引き戻す', () => {
+  it('奥行きが幅に対して人間離れしていたら引き戻す', () => {
     // 奥行きだけ極端に大きい被写体を作る
     const raw = new Float32Array(S * S);
     const alpha = new Uint8ClampedArray(S * S);
@@ -443,7 +443,61 @@ describe('実寸と局所起伏（v2.2、実写での測定にもとづく）', 
       }
     }
     const r = calibrate({ raw, width: S, height: S, alpha, kind: 'depth', focalPx: FOCAL });
-    expect(r.depthToHeight).toBeLessThanOrEqual(0.95);
+    expect(r.depthToWidth).toBeLessThanOrEqual(0.9);
+  });
+
+  it('妥当性は高さではなく幅で見る（構図に左右されないため）', () => {
+    // 同じ体を、全身とバストアップで切り出す。奥行き ÷ 高さ は構図で
+    // 大きく変わるが、奥行き ÷ 幅 は変わらないはず。
+    function subject(y0: number, y1: number) {
+      const raw = new Float32Array(S * S);
+      const alpha = new Uint8ClampedArray(S * S);
+      const cx = S / 2;
+      const halfW = 14;
+      for (let y = y0; y < y1; y++) {
+        for (let x = cx - halfW; x < cx + halfW; x++) {
+          const i = y * S + x;
+          alpha[i] = 255;
+          // 円柱の表面。奥行きは幅で決まり、高さには依らない。
+          const t = (x - cx) / halfW;
+          raw[i] = 1.0 - 0.08 * Math.sqrt(Math.max(0, 1 - t * t));
+        }
+      }
+      return { raw, alpha };
+    }
+    const full = subject(10, 86);
+    const bust = subject(10, 40);
+    const a = calibrate({ ...full, width: S, height: S, kind: 'depth', focalPx: FOCAL });
+    const b = calibrate({ ...bust, width: S, height: S, kind: 'depth', focalPx: FOCAL });
+
+    // 高さ比は構図で大きく動く
+    expect(Math.abs(a.depthToHeight - b.depthToHeight)).toBeGreaterThan(0.1);
+    // 幅比はほとんど動かない
+    expect(Math.abs(a.depthToWidth - b.depthToWidth)).toBeLessThan(0.1);
+  });
+
+  it('局所強調は奥行きの幅を広げない', () => {
+    // 「大域の形は平滑化成分が持つので比率は変わらない」と書いていたが、
+    // 実測では 奥行き ÷ 身長 が 0.539 → 0.721（+34%）に広がっていた。
+    // 体が奥へ伸びると、少し回しただけで串のように崩れる。
+    const raw = new Float32Array(S * S);
+    const alpha = new Uint8ClampedArray(S * S);
+    const cx = S / 2;
+    for (let y = 12; y < 84; y++) {
+      for (let x = cx - 16; x < cx + 16; x++) {
+        const i = y * S + x;
+        alpha[i] = 255;
+        const t = (x - cx) / 16;
+        // 大域のふくらみ＋細かい起伏
+        raw[i] =
+          1.0 - 0.06 * Math.sqrt(Math.max(0, 1 - t * t)) + 0.004 * Math.sin(x * 0.9) * Math.cos(y * 0.9);
+      }
+    }
+    const base = { raw, width: S, height: S, alpha, kind: 'depth' as const, focalPx: FOCAL };
+    const flat = calibrate({ ...base, reliefBoost: 1 });
+    const boosted = calibrate({ ...base, reliefBoost: 3 });
+    // 奥行きの幅は変わらない（誤差 10% 以内）
+    expect(boosted.depthToWidth).toBeCloseTo(flat.depthToWidth, 1);
   });
 });
 

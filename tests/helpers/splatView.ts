@@ -57,6 +57,25 @@ export function decodeSplats(data: Uint8Array, count: number): Decoded {
   return { x, y, z, r };
 }
 
+/**
+ * 点群の 奥行き ÷ 幅（短辺）。人物なら 0.9 前後が自然（他実装の実測 0.895）。
+ *
+ * 高さで割ると構図に左右される（全身 0.36 / バストアップ 1 近く）が、
+ * 幅で割れば安定する。人はどこを切っても幅と同じくらいの奥行きを持つ。
+ */
+export function depthToWidth(data: Uint8Array, count: number): number {
+  const { x, y, z } = decodeSplats(data, count);
+  const q = (a: Float32Array, f: number): number => {
+    const s = Array.from(a).sort((p, r) => p - r);
+    return s[Math.floor(f * (s.length - 1))] as number;
+  };
+  const h = q(y, 0.99) - q(y, 0.01);
+  const w = q(x, 0.99) - q(x, 0.01);
+  const d = q(z, 0.99) - q(z, 0.01);
+  void h;
+  return w > 1e-9 ? d / w : 0;
+}
+
 /** 指定した角度から描いて、被覆マスクを返す。 */
 export function renderCoverage(
   data: Uint8Array,

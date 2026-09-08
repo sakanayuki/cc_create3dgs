@@ -114,6 +114,19 @@ export interface FuseParams {
   /** 被写体とみなす α の下限。 */
   readonly subjectThreshold?: number;
   /**
+   * タイルが担当する構造の上限（画素）。これより粗い成分は全体パスの
+   * ものをそのまま使う。0 なら全帯域をタイルと混ぜる（v2.2 までの挙動）。
+   *
+   * タイルは全体パスと違う切り出し方で推論されるので、低周波（＝体全体の
+   * 形）が一致しない。そこを混ぜると、食い違いがそのまま奥行きの歪みに
+   * なる。実写で測ると、タイルパスは被写体の 奥行き÷身長 を 0.506 → 0.760
+   * と 50% も膨らませていた（理想は 0.36 前後）。
+   *
+   * タイルパスの目的は顔の凹凸を出すこと、つまり**細部**である。大域は
+   * 全体パスが正しく、そこはタイルに触らせない。
+   */
+  readonly detailScalePx?: number;
+  /**
    * 全体パスの重み。タイルは最大 1 なので、これを小さくするほど
    * タイルの細部が残る。0 にしてはいけない。タイルが1枚も掛からない
    * 領域（背景など）で分母が 0 になる。
@@ -129,6 +142,10 @@ export const DEFAULT_FUSE_PARAMS: FuseParams = {
   // タイル内部ではタイルが約 87% を占める。全体パスと半々にすると、
   // タイルパスに 1.6 秒かけて得た細部が半分に薄まってしまう。
   globalWeight: 0.15,
+  // 実写で振って決めた。16px より粗い成分を全体パスに任せると、奥行きの
+  // 膨張が最小（奥行÷身長 0.837 → 0.721）になり、しかも顔の起伏が
+  // 2.1 倍（87.8 → 183.2）になる。低周波の食い違いが細部を潰していた。
+  detailScalePx: 16,
 };
 
 /** タイル内での位置に応じた羽根（端で 0、内側で 1）。 */
@@ -228,8 +245,14 @@ export function fuseDepth(
     weights.push(weight);
   }
 
+  // detailScalePx より粗い層は全体パス（sources[0]）に固定する。
+  // 層 l の構造の大きさはおおよそ 2^l 画素。
+  const detail = params.detailScalePx ?? 0;
+  const keepFrom = detail > 0 ? Math.max(0, Math.ceil(Math.log2(Math.max(detail, 1)))) : 0;
+  const referenceLevels = detail > 0 ? Math.max(0, params.levels + 1 - keepFrom) : 0;
+
   return {
-    depth: blendLaplacian(sources, weights, width, height, params.levels),
+    depth: blendLaplacian(sources, weights, width, height, params.levels, referenceLevels),
     fits,
   };
 }

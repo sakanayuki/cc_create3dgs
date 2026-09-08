@@ -138,6 +138,9 @@ export function collapse(pyramid: Level[]): Float32Array {
  * @param sources 同じ大きさの入力たち。
  * @param weights 各入力の重み。負でないこと。全部 0 の画素は 0 を返す。
  * @param levels  段数。1024² なら 6 段（最小 32²）が目安。
+ * @param referenceLevels 粗いほうから数えてこの段数は `sources[0]` だけを使う。
+ *                        大域の形を 1 つ目の入力に固定したいときに指定する。
+ *                        0（既定）なら全段を重みで混ぜる（従来の挙動）。
  */
 export function blendLaplacian(
   sources: ArrayLike<number>[],
@@ -145,6 +148,7 @@ export function blendLaplacian(
   width: number,
   height: number,
   levels = 6,
+  referenceLevels = 0,
 ): Float32Array {
   if (sources.length === 0) throw new Error('入力がありません');
   if (sources.length !== weights.length) throw new Error('入力と重みの数が違います');
@@ -166,9 +170,18 @@ export function blendLaplacian(
   const gw = norm.map((w) => gaussianPyramid(w, width, height, levels));
   const depth = Math.min(...lap.map((p) => p.length));
 
+  // 粗い層を基準の入力に固定する境目。
+  const fixedFrom = Math.max(0, depth - Math.max(0, Math.min(depth, referenceLevels)));
+
   const blended: Level[] = [];
   for (let l = 0; l < depth; l++) {
     const ref = (lap[0] as Level[])[l] as Level;
+    if (l >= fixedFrom) {
+      // 大域の形は基準の入力そのまま。混ぜると、入力同士の低周波の
+      // 食い違いがそのまま形の歪みになる。
+      blended.push({ data: Float32Array.from(ref.data), width: ref.width, height: ref.height });
+      continue;
+    }
     const d = new Float32Array(ref.width * ref.height);
     for (let k = 0; k < lap.length; k++) {
       const src = (lap[k] as Level[])[l] as Level;
