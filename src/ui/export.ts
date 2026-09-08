@@ -12,10 +12,20 @@ import {
   SPZ_FRACTIONAL_BITS,
   type SpzPointOut,
 } from '../codec/spz';
-import { SPLAT_BYTES } from '../render/SplatRenderer';
+import { SPLAT_BYTES, SURFEL_FLATNESS } from '../render/SplatRenderer';
 
-/** サーフェルは厚みを持たない。法線方向のスケールはこの対数値にする。 */
-const FLAT_LOG_SCALE = -8;
+/**
+ * 法線方向のスケール（厚み）。面内の半径に**比例**させる（v2.6.3）。
+ *
+ * v2.6.2 まではここを定数 `exp(-8) = 3.35e-4` にしていた。小さいスプラット
+ * では比 0.34 と妥当だが、統合された大きいスプラット（半径 0.005）では
+ * 0.067 と極端に平たくなり、外部ビューアで寝たときに線に潰れていた。
+ * 参照実装（SHARP）の出力は大きさ帯によらず比 0.33〜0.45 で一定である。
+ * 詳しくは `SURFEL_FLATNESS`（docs/06 §6.11）。
+ */
+function thicknessOf(sx: number, sy: number): number {
+  return Math.max(SURFEL_FLATNESS * Math.max(sx, sy), 1e-6);
+}
 
 /** SH 0次の基底関数の値。PLY の f_dc はこれで割った係数として入る。 */
 const SH_C0 = 0.28209479177387814;
@@ -125,7 +135,7 @@ export function splatsToSpzRaw(data: Uint8Array, count: number): Uint8Array {
       // サーフェルは平ら。法線方向だけ極小にする。
       out.logScale0 = Math.log(Math.max(u.sx, 1e-6));
       out.logScale1 = Math.log(Math.max(u.sy, 1e-6));
-      out.logScale2 = FLAT_LOG_SCALE;
+      out.logScale2 = Math.log(thicknessOf(u.sx, u.sy));
       const [qx, qy, qz, qw] = quatFromNormal(u.nx, u.ny, u.nz);
       out.qx = qx;
       out.qy = qy;
@@ -151,7 +161,7 @@ export function splatsToPly(data: Uint8Array, count: number): Uint8Array {
     out.opacityLogit = logit(u.a / 255);
     out.logScale0 = Math.log(Math.max(u.sx, 1e-6));
     out.logScale1 = Math.log(Math.max(u.sy, 1e-6));
-    out.logScale2 = FLAT_LOG_SCALE;
+    out.logScale2 = Math.log(thicknessOf(u.sx, u.sy));
     const [qx, qy, qz, qw] = quatFromNormal(u.nx, u.ny, u.nz);
     out.rotW = qw;
     out.rotX = qx;
@@ -205,7 +215,7 @@ export function splatsToSplat(data: Uint8Array, count: number): Uint8Array {
   for (let i = 0; i < count; i++) {
     unpack(data, i, u);
     order[i] = i;
-    key[i] = u.sx * u.sy * Math.exp(FLAT_LOG_SCALE) * (u.a / 255);
+    key[i] = u.sx * u.sy * thicknessOf(u.sx, u.sy) * (u.a / 255);
   }
   const sorted = Array.from(order).sort(
     (a, b) => (key[b] as number) - (key[a] as number),
@@ -213,7 +223,6 @@ export function splatsToSplat(data: Uint8Array, count: number): Uint8Array {
 
   const out = new Uint8Array(count * SPLAT_STRIDE);
   const f32 = new Float32Array(out.buffer);
-  const flat = Math.exp(FLAT_LOG_SCALE);
 
   for (let n = 0; n < count; n++) {
     unpack(data, sorted[n] as number, u);
@@ -222,10 +231,10 @@ export function splatsToSplat(data: Uint8Array, count: number): Uint8Array {
     f32[of] = u.x;
     f32[of + 1] = u.y;
     f32[of + 2] = u.z;
-    // .splat のスケールは線形。サーフェルなので法線方向だけ極小にする。
+    // .splat のスケールは線形。厚みは面内の半径に比例させる。
     f32[of + 3] = u.sx;
     f32[of + 4] = u.sy;
-    f32[of + 5] = flat;
+    f32[of + 5] = thicknessOf(u.sx, u.sy);
     out[o + 24] = u.r;
     out[o + 25] = u.g;
     out[o + 26] = u.b;

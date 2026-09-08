@@ -19,6 +19,10 @@ uniform mat4 uViewProj;
 uniform vec2 uViewport;
 uniform float uFilter2d;
 
+// サーフェルの厚み ÷ 面内の半径。SplatRenderer.ts の SURFEL_FLATNESS と
+// 同じ値でなければならない（exportSplats.test.ts が確かめる）。
+const float SURFEL_FLATNESS = 0.35;
+
 in uint aIndex;   // インスタンスごと: ソート済みのスプラット番号
 in vec2 aCorner;  // 頂点ごと: クアッドの隅 (±1)
 
@@ -74,12 +78,32 @@ void main() {
   }
   vec2 center = clip.xy / clip.w;
 
+  // 接平面の2軸と厚みを射影する。厚みを 0 にすると寝たサーフェルが
+  // 線に潰れて斜めの縞になる（docs/09 §V15）。
   vec3 e1, e2;
   onb(nrm, e1, e2);
   vec4 p1 = uViewProj * vec4(pos + e1 * scale.x, 1.0);
   vec4 p2 = uViewProj * vec4(pos + e2 * scale.y, 1.0);
-  vec2 a1 = p1.xy / p1.w - center;
-  vec2 a2 = p2.xy / p2.w - center;
+  vec4 p3 = uViewProj * vec4(pos + nrm * (SURFEL_FLATNESS * max(scale.x, scale.y)), 1.0);
+  vec2 b1 = p1.xy / p1.w - center;
+  vec2 b2 = p2.xy / p2.w - center;
+  vec2 b3 = p3.xy / p3.w - center;
+
+  // 画面上の 2×2 共分散と、その固有分解（WGSL 版と同じ式）。
+  float cxx = b1.x * b1.x + b2.x * b2.x + b3.x * b3.x;
+  float cxy = b1.x * b1.y + b2.x * b2.y + b3.x * b3.y;
+  float cyy = b1.y * b1.y + b2.y * b2.y + b3.y * b3.y;
+  float tr = cxx + cyy;
+  float det = cxx * cyy - cxy * cxy;
+  float disc = sqrt(max(tr * tr * 0.25 - det, 0.0));
+  float lam1 = tr * 0.5 + disc;
+  float lam2 = max(tr * 0.5 - disc, 0.0);
+  vec2 v1 = vec2(lam1 - cyy, cxy);
+  if (dot(v1, v1) < 1e-20) v1 = vec2(cxy, lam1 - cxx);
+  if (dot(v1, v1) < 1e-20) v1 = vec2(1.0, 0.0);
+  v1 = normalize(v1);
+  vec2 a1 = v1 * sqrt(lam1);
+  vec2 a2 = vec2(-v1.y, v1.x) * sqrt(lam2);
 
   // Mip-Splatting 流の 2D 低域フィルタ。1px を下回るサーフェルの点滅を抑える。
   vec2 px = 2.0 / uViewport;

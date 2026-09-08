@@ -17,7 +17,8 @@ import {
   toSplatFile,
   type ExportFormat,
 } from '../../src/ui/export';
-import { SPLAT_BYTES } from '../../src/render/SplatRenderer';
+import { readFileSync } from 'node:fs';
+import { SPLAT_BYTES, SURFEL_FLATNESS } from '../../src/render/SplatRenderer';
 
 /** 既知の値を持つスプラットを1個だけ作る。 */
 function oneSplat(
@@ -78,14 +79,28 @@ describe('.spz 書き出し', () => {
     expect(linearOf(100)).toBeGreaterThan(linearOf(20));
   });
 
-  it('サーフェルは法線方向だけ極端に薄い', () => {
+  it('厚みは面内の半径に比例する（v2.6.3）', () => {
     const data = oneSplat([0, 0, 0], [0, 0, 1], [0.02, 0.02], [128, 128, 128, 255]);
     const spz = splatsToSpzRaw(data, 1);
     const scaleOffset = 16 + 9 + 1 + 3;
     const decode = (o: number): number => (spz[o] as number) / 16 - 10;
     const s0 = decode(scaleOffset);
     const s2 = decode(scaleOffset + 2);
-    expect(s2).toBeLessThan(s0 - 3); // 2軸に対して桁違いに薄い
+    // 対数空間なので差は log(FLATNESS)。量子化の刻みは 1/16。
+    expect(s2 - s0, `log の差 ${(s2 - s0).toFixed(3)}`).toBeCloseTo(
+      Math.log(SURFEL_FLATNESS),
+      1,
+    );
+  });
+
+  it('大きいスプラットでも比が変わらない（定数の厚みに戻していない）', () => {
+    const ratios = [0.004, 0.02, 0.08].map((r) => {
+      const spz = splatsToSpzRaw(oneSplat([0, 0, 0], [0, 0, 1], [r, r], [128, 128, 128, 255]), 1);
+      const o = 16 + 9 + 1 + 3;
+      const d = (k: number): number => (spz[o + k] as number) / 16 - 10;
+      return d(2) - d(0);
+    });
+    for (const v of ratios) expect(v).toBeCloseTo(Math.log(SURFEL_FLATNESS), 1);
   });
 });
 
@@ -174,7 +189,8 @@ describe('.splat 書き出し', () => {
     // .splat のスケールは対数ではなく線形
     expect(f[3]).toBeCloseTo(0.02, 3);
     expect(f[4]).toBeCloseTo(0.03, 3);
-    expect(f[5]).toBeLessThan(0.001); // 法線方向は極小（サーフェル）
+    // 厚みは面内の大きいほうの半径に比例する（v2.6.3）
+    expect(f[5]).toBeCloseTo(SURFEL_FLATNESS * 0.03, 5);
   });
 
   it('色は画素値がそのまま入る（DC を経由しない）', () => {
@@ -229,5 +245,33 @@ describe('形式の選択', () => {
   it('.splat の実体は 32 バイト × 個数', async () => {
     const blob = await toSplatFile(data, 1, 'splat');
     expect(blob.size).toBe(SPLAT_STRIDE);
+  });
+});
+
+/**
+ * 厚みの比はシェーダ（WGSL / GLSL）と書き出しの 3 か所に現れる。ずれると
+ * 自前ビューアと外部ビューアで形が変わり、しかもどちらも「それらしく」
+ * 見えるので気づけない。機械的に照合する（docs/06 §6.11）。
+ */
+describe('厚みの比が実装をまたいで一致する', () => {
+  const cases: [string, RegExp][] = [
+    ['src/render/wgsl/splat.wgsl', /const\s+SURFEL_FLATNESS\s*:\s*f32\s*=\s*([0-9.]+)\s*;/],
+    ['src/render/glsl/splat.vert', /const\s+float\s+SURFEL_FLATNESS\s*=\s*([0-9.]+)\s*;/],
+  ];
+
+  for (const [file, re] of cases) {
+    it(`${file} の値が SplatRenderer.ts と同じ`, () => {
+      const src = readFileSync(new URL(`../../${file}`, import.meta.url), 'utf8');
+      const m = re.exec(src);
+      expect(m, `${file} に SURFEL_FLATNESS の定義が見つかりません`).not.toBeNull();
+      expect(Number((m as RegExpExecArray)[1])).toBe(SURFEL_FLATNESS);
+    });
+  }
+
+  it('シェーダが厚みを実際に使っている（3 軸目を射影している）', () => {
+    for (const [file] of cases) {
+      const src = readFileSync(new URL(`../../${file}`, import.meta.url), 'utf8');
+      expect(src, `${file} が SURFEL_FLATNESS を使っていません`).toContain('SURFEL_FLATNESS *');
+    }
   });
 });

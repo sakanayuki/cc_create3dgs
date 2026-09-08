@@ -164,13 +164,16 @@ test.describe('パイプライン通しの描画', () => {
 
     expect(front.count, 'スプラットが1個も作られていません').toBeGreaterThan(1000);
     expect(front.frontCount).toBeGreaterThan(0);
-    expect(front.count, '背面シェルが作られていません').toBeGreaterThan(front.frontCount);
+    // 背面シェルは v2.6 で既定を false にした（docs/09 §V11）。被写体は
+    // 滑らかな楕円体で深度の段差が無いのでスカートも立たない。よって
+    // 合計は前面と一致する。増えていたら背面かスカートが復活している。
+    expect(front.count, '背面シェルかスカートが復活しています').toBe(front.frontCount);
 
-    // 正面から見たら背面シェルは1個も描かれないはず。ここが崩れるときは
+    // 正面から見たら、前面シェル以外は1個も描かれないはず。ここが崩れるときは
     // 座標系（y と z の反転）か法線の向きを取り違えている。
     expect(
       front.drawn,
-      `正面なのに背面シェルが描かれています（描画 ${front.drawn} / 前面 ${front.frontCount}）`,
+      `正面なのに余分なスプラットが描かれています（描画 ${front.drawn} / 前面 ${front.frontCount}）`,
     ).toBeLessThanOrEqual(front.frontCount);
     expect(front.drawn / front.frontCount, '前面シェルがほとんど描かれていません').toBeGreaterThan(0.9);
 

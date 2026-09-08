@@ -29,6 +29,7 @@ PoC-1（Android 10 実機）で前提が2つ覆りました。**WebGPU が使え
 | 07 | [CI/CD と性能バジェット](./07-cicd.md) | GitHub Actions 4ワークフロー、Pages配信、バジェット強制 |
 | 08 | [リスクと検証計画](./08-risks.md) | 技術リスク一覧とPoCによる検証順序 |
 | 09 | [斜めから見たときの破綻と、その検査](./09-view-defects.md) | 実写で見つかった壊れ方の型と、回して測る検査 |
+| 10 | [参照実装との比較と、取り込みの判断](./10-literature.md) | SHARP / TripoSplat を実測して選別した記録。外したものと理由も |
 | — | [実機計測の記録](./measurements.md) | PoC の実測値。CI では測れない時間の指標をここに蓄積する |
 
 閲覧用の要約ページ: [design-overview.html](./design-overview.html)
