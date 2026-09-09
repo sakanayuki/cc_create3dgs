@@ -166,6 +166,58 @@ describe('内部の穴埋め', () => {
     expect(out[0]).toBe(0);
   });
 
+  it('両脚の間のような大きな隙間は埋めない（v2.6.4、docs/09 §V17）', () => {
+    // 直立した人物を模す。胴 → 2 本の脚。脚は股と足先でつながるので、
+    // 間の隙間は位相的に「内部の穴」になる。
+    const S = 128;
+    const a = new Uint8ClampedArray(S * S);
+    const put = (y0: number, y1: number, x0: number, x1: number): void => {
+      for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) a[y * S + x] = 255;
+    };
+    put(10, 50, 44, 84); // 胴
+    put(50, 118, 44, 60); // 左脚
+    put(50, 118, 68, 84); // 右脚
+    put(112, 118, 44, 84); // 足先でくっつく
+    const out = fillInteriorHoles(a, S, S);
+    // 隙間（x=60..68、y=55..110）は残ること
+    let filled = 0;
+    for (let y = 55; y < 110; y++) for (let x = 60; x < 68; x++) {
+      if ((out[y * S + x] as number) >= 128) filled++;
+    }
+    expect(filled, `脚の間の ${filled} 画素が埋められました`).toBe(0);
+  });
+
+  it('大きな隙間があっても、小さな抜けは埋める', () => {
+    const S = 128;
+    const a = new Uint8ClampedArray(S * S);
+    const put = (y0: number, y1: number, x0: number, x1: number): void => {
+      for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) a[y * S + x] = 255;
+    };
+    put(10, 50, 44, 84);
+    put(50, 118, 44, 60);
+    put(50, 118, 68, 84);
+    put(112, 118, 44, 84);
+    // 胴の真ん中にマットの抜けを開ける
+    for (let y = 28; y < 32; y++) for (let x = 62; x < 66; x++) a[y * S + x] = 0;
+    const out = fillInteriorHoles(a, S, S);
+    expect(out[29 * S + 63], '小さな抜けが埋まっていません').toBe(255);
+    expect(out[80 * S + 64], '脚の間が埋まっています').toBe(0);
+  });
+
+  it('上限を 0 にすると従来どおり全部埋める', () => {
+    const S = 128;
+    const a = new Uint8ClampedArray(S * S);
+    const put = (y0: number, y1: number, x0: number, x1: number): void => {
+      for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) a[y * S + x] = 255;
+    };
+    put(10, 50, 44, 84);
+    put(50, 118, 44, 60);
+    put(50, 118, 68, 84);
+    put(112, 118, 44, 84);
+    const out = fillInteriorHoles(a, S, S, 128, 0);
+    expect(out[80 * S + 64]).toBe(255);
+  });
+
   it('外へ通じた切り欠きは埋めない', () => {
     const a = squareAlpha();
     const c = SIZE / 2;

@@ -14,6 +14,23 @@
 /** α をこの値以上なら被写体とみなす。二値処理の閾値。 */
 export const SUBJECT_ALPHA = 128;
 
+/**
+ * 埋めてよい内部の穴の上限（被写体の画素数に対する割合）。
+ *
+ * 実測で、埋めたい穴（マットの抜け）は被写体の 0.01%、埋めてはいけない
+ * 隙間（両脚の間）は 3.41% だった。3 桁の隔たりの中央あたりに置く。
+ */
+const DEFAULT_MAX_HOLE_RATIO = 0.005;
+
+/**
+ * 割合に関わらず埋めてよい穴の大きさ（画素）。
+ *
+ * 被写体が極端に小さいとき（検査用の合成画像や縮小プレビュー）、割合だけだと
+ * 数画素の抜けも「大きな隙間」に見えてしまう。この大きさの穴が実際の隙間で
+ * あることは無いので、下限として置く。
+ */
+const MIN_FILL_PIXELS = 16;
+
 // --- 箱フィルタ（積分画像） -------------------------------------------------
 
 /**
@@ -283,19 +300,37 @@ export function removeSmallComponents(
 }
 
 /**
- * 被写体内部の穴を埋める。
+ * 被写体内部の穴を埋める。**ただし小さいものだけ**（v2.6.4、docs/09 §V17）。
  *
  * 背景側から塗りつぶして、どこからも到達できない背景画素＝内部の穴とみなす。
  * 黒い服や濃い影でマット推定が抜けることがあり、そのまま3D化すると
  * 被写体を貫通する窓が空く。
  *
+ * **大きさの上限が要る。** 直立した人物では、両脚の間の隙間が股と足先で
+ * 閉じるため位相的に「内部の穴」になり、外周からの塗りつぶしが届かない。
+ * 実写（立ち姿）で MODNet も u2netp も脚の間を 6〜20px 正しく開けていたのに、
+ * ここで塞いでいた。塞いだ帯には床の深度が入るので、脚の間に板が張る。
+ *
+ * 埋めるべき穴と埋めてはいけない隙間は、大きさが桁で違う。同じ写真での実測:
+ *
+ * | | 大きさ | 被写体に対する割合 | 外接 |
+ * |---|---|---|---|
+ * | 脚の間（埋めてはいけない） | 4,418 px | **3.41%** | 22×347 |
+ * | 本物の穴（埋めたい） | 13 / 13 / 1 px | **0.01%** | 2×8 など |
+ *
+ * 3 桁離れているので、割合の閾値ひとつで分けられる。
+ *
  * 埋める値は 255。半端な値で埋めると、そこだけ半透明の膜が張って見える。
+ *
+ * @param maxHoleRatio 被写体の画素数に対するこの割合を超える穴は埋めない。
+ *                     0 以下ならすべて埋める（v2.6.3 までの挙動）。
  */
 export function fillInteriorHoles(
   alpha: Uint8ClampedArray,
   width: number,
   height: number,
   threshold = SUBJECT_ALPHA,
+  maxHoleRatio = DEFAULT_MAX_HOLE_RATIO,
 ): Uint8ClampedArray {
   const n = width * height;
   const reached = new Uint8Array(n);
@@ -329,8 +364,44 @@ export function fillInteriorHoles(
   }
 
   const out = new Uint8ClampedArray(alpha);
-  for (let i = 0; i < n; i++) {
-    if (reached[i] === 0 && (alpha[i] as number) < threshold) out[i] = 255;
+  if (maxHoleRatio <= 0) {
+    for (let i = 0; i < n; i++) {
+      if (reached[i] === 0 && (alpha[i] as number) < threshold) out[i] = 255;
+    }
+    return out;
+  }
+
+  // 穴を連結成分に分け、大きすぎるものは残す。
+  let subject = 0;
+  for (let i = 0; i < n; i++) if ((alpha[i] as number) >= threshold) subject++;
+  const limit = Math.max(subject * maxHoleRatio, MIN_FILL_PIXELS);
+
+  const seen = new Uint8Array(n);
+  const group: number[] = [];
+  for (let start = 0; start < n; start++) {
+    if (seen[start] === 1 || reached[start] === 1) continue;
+    if ((alpha[start] as number) >= threshold) continue;
+    // 幅優先で 1 つの穴を集める
+    group.length = 0;
+    seen[start] = 1;
+    group.push(start);
+    for (let head = 0; head < group.length; head++) {
+      const i = group[head] as number;
+      const x = i % width;
+      const y = (i / width) | 0;
+      const visit = (j: number): void => {
+        if (seen[j] === 1 || reached[j] === 1) return;
+        if ((alpha[j] as number) >= threshold) return;
+        seen[j] = 1;
+        group.push(j);
+      };
+      if (x > 0) visit(i - 1);
+      if (x < width - 1) visit(i + 1);
+      if (y > 0) visit(i - width);
+      if (y < height - 1) visit(i + width);
+    }
+    if (group.length > limit) continue; // 脚の間のような大きな隙間は残す
+    for (const i of group) out[i] = 255;
   }
   return out;
 }
