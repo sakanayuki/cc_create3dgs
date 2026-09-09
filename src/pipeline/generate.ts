@@ -34,6 +34,7 @@ import {
 } from './0-preprocess';
 import { fuseDepth, type DepthTile } from './2-depth';
 import { applyLimbRoundness, DEFAULT_LIMB_PARAMS } from './geometry/limbRoundness';
+import { clampReliefAmplitude, DEFAULT_RELIEF_CLAMP } from './geometry/reliefClamp';
 import {
   buildInpaintMask,
   compositeInpaint,
@@ -899,6 +900,12 @@ export async function generate(photo: Blob, options: GenerateOptions): Promise<G
     const headBox = headBoxFromMatte(alpha, grid, grid);
     metric = await mark('四肢の丸み', () =>
       applyLimbRoundness(metric, alpha, grid, grid, focalPx, DEFAULT_LIMB_PARAMS, headBox),
+    );
+
+    // 服の合わせや裾で深度が手前へ行き過ぎたぶんを詰める（docs/09 §V21）。
+    // 大域は触らず、細部の振幅だけを体幅の 0.8% までに収める。
+    metric = await mark('起伏の振幅', () =>
+      clampReliefAmplitude(metric, alpha, grid, grid, focalPx, DEFAULT_RELIEF_CLAMP, headBox),
     );
   }
 
