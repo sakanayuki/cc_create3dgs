@@ -105,16 +105,17 @@ export function clampReliefAmplitude(
     y >= exclude.y &&
     y < exclude.y + exclude.height;
 
-  // ① 画素単位の雑音を均す。
+  // ① 画素単位の雑音を均す。**顔も含めて被写体全体に掛ける**。
+  //
+  // `exclude` は②の振幅の上限だけを外すための四角である。①は別の目的で、
+  // 深度モデルの画素単位のざらつきを落として法線を整えるもの。顔だけ外すと、
+  // 顔は較正の局所強調（体の 3 倍）を通ったざらつきをそのまま抱えることに
+  // なり、至近で見たときにいちばん荒れる場所になる（docs/09 §V23）。
   const denoise = Math.round(params.denoiseRadius);
   if (denoise >= 1) {
     const blurred = maskedBoxBlur(out, mask, width, height, denoise);
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        const i = y * width + x;
-        if (mask[i] === 0 || inExcluded(x, y)) continue;
-        out[i] = blurred[i] as number;
-      }
+    for (let i = 0; i < out.length; i++) {
+      if (mask[i] === 1) out[i] = blurred[i] as number;
     }
   }
 

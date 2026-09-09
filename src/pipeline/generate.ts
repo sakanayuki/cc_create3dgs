@@ -36,6 +36,7 @@ import {
 import { fuseDepth, type DepthTile } from './2-depth';
 import { applyLimbRoundness, DEFAULT_LIMB_PARAMS } from './geometry/limbRoundness';
 import { clampReliefAmplitude, DEFAULT_RELIEF_CLAMP } from './geometry/reliefClamp';
+import { limitCrossSectionDent, DEFAULT_CROSS_SECTION } from './geometry/crossSection';
 import {
   buildInpaintMask,
   compositeInpaint,
@@ -928,6 +929,12 @@ export async function generate(photo: Blob, options: GenerateOptions): Promise<G
     // 大域は触らず、細部の振幅だけを体幅の 0.8% までに収める。
     metric = await mark('起伏の振幅', () =>
       clampReliefAmplitude(metric, alpha, grid, grid, focalPx, DEFAULT_RELIEF_CLAMP, headBox),
+    );
+
+    // 服の開口部の中を奥へ置きすぎるのを止める（docs/09 §V24）。
+    // 横断面が手前側の凸包から体幅の 10% より奥へ凹むことは、人体では無い。
+    metric = await mark('断面の凹み', () =>
+      limitCrossSectionDent(metric, alpha, grid, grid, focalPx, DEFAULT_CROSS_SECTION, headBox),
     );
   }
 

@@ -117,6 +117,25 @@ describe('起伏の振幅を体らしい範囲に収める', () => {
     expect(rough / n, 'ざらつきが残っています').toBeLessThan(0.0005);
   });
 
+  it('雑音均しは外す四角の中にも掛かる（顔も均す）', () => {
+    // `exclude` は②の振幅の上限だけを外すための四角である。①の雑音均しは
+    // 顔にも要る。顔だけ外すと、較正の局所強調（体の 3 倍）を通ったざらつきを
+    // 顔がそのまま抱えることになる（docs/09 §V23）。
+    const { depth, alpha } = scene();
+    for (let i = 0; i < depth.length; i++) depth[i] = Z + (i % 2 === 0 ? 1 : -1) * 0.002;
+    const head = { x: 50, y: 40, width: 60, height: 60 };
+    const out = clampReliefAmplitude(depth, alpha, W, H, FOCAL, DEFAULT_RELIEF_CLAMP, head);
+    let rough = 0;
+    let n = 0;
+    for (let y = 55; y < 95; y++) {
+      for (let x = 60; x < 100; x++) {
+        rough += Math.abs((out[y * W + x] as number) - Z);
+        n++;
+      }
+    }
+    expect(rough / n, '外した四角の中でざらつきが残っています').toBeLessThan(0.0005);
+  });
+
   it('焦点距離が 0 なら何もしない', () => {
     const { depth, alpha } = scene();
     const out = clampReliefAmplitude(depth, alpha, W, H, 0);

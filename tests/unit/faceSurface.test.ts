@@ -270,12 +270,13 @@ describe('顔の輪郭に沿った隆起（v2.6.1）', () => {
     return d;
   }
 
-  it('landmark 面が大域しか持たないなら深度は 1 画素も動かない', () => {
+  it('landmark 面が大域しか持たないなら細部は 1 画素も足さない', () => {
     // z が一定 = 細部が無い面。足すべきものが無いのだから、何も足さない。
+    // 傾きの補正は別の話なので切って、細部の経路だけを見る。
     const s = faceDepthSurface(flatFace(128, 128, 40), rect);
     expect(s.covered).toBeGreaterThan(1000);
     const base = domeDepth(0.05);
-    const out = applyFaceRelief(base, s, rect, G, G, FOCAL);
+    const out = applyFaceRelief(base, s, rect, G, G, FOCAL, false);
     let worst = 0;
     for (let i = 0; i < base.length; i++) {
       worst = Math.max(worst, Math.abs((out[i] as number) - (base[i] as number)));
@@ -340,6 +341,75 @@ describe('顔の輪郭に沿った隆起（v2.6.1）', () => {
  * 顔だけを見る深度タイル（docs/09 §V18）。全身写真では顔がタイルの中の
  * 一部でしかなく、深度モデルが鼻も眼窩も出さない。
  */
+describe('顔の傾きを landmark に合わせる（v2.6.8）', () => {
+  const rect = { x: 68, y: 68, width: 120, height: 120 };
+  const FOCAL = 500;
+
+  /** 横に `slope`（実寸/画素）傾いた深度。 */
+  function tiltedDepth(slope: number): Float32Array {
+    const d = new Float32Array(G * G).fill(1);
+    for (let y = 0; y < G; y++) {
+      for (let x = 0; x < G; x++) d[y * G + x] = 1 + slope * (x - 128);
+    }
+    return d;
+  }
+
+  it('正面の landmark に対し、深度の横の傾きが消える', () => {
+    // 深度モデルは顔を 16° 横に向けている。landmark は正面だと言っている。
+    const s = faceDepthSurface(flatFace(128, 128, 40), rect);
+    const slope = 0.0002;
+    const base = tiltedDepth(slope);
+    const out = applyFaceRelief(base, s, rect, G, G, FOCAL);
+    const k = 30;
+    const before = (base[128 * G + 128 + k] as number) - (base[128 * G + 128 - k] as number);
+    const after = (out[128 * G + 128 + k] as number) - (out[128 * G + 128 - k] as number);
+    expect(before).toBeCloseTo(2 * k * slope, 6);
+    expect(
+      Math.abs(after / before),
+      `傾きが ${(100 * Math.abs(after / before)).toFixed(0)}% 残っています`,
+    ).toBeLessThan(0.15);
+  });
+
+  it('landmark も傾いているなら、その傾きは残す（本当に横を向いた顔）', () => {
+    // landmark 面自体を横に傾ける。顔が本当に横を向いているときは直さない。
+    const slope = 0.0002;
+    const perPixel = 1 / FOCAL;
+    const pts = flatFace(128, 128, 40).map((p) => ({
+      ...p,
+      z: p.z + (slope / perPixel) * (p.x - 128),
+    }));
+    const s = faceDepthSurface(pts, rect);
+    const base = tiltedDepth(slope);
+    const out = applyFaceRelief(base, s, rect, G, G, FOCAL);
+    const k = 30;
+    const before = (base[128 * G + 128 + k] as number) - (base[128 * G + 128 - k] as number);
+    const after = (out[128 * G + 128 + k] as number) - (out[128 * G + 128 - k] as number);
+    expect(
+      after / before,
+      `本物の向きが ${(100 * (after / before)).toFixed(0)}% しか残っていません`,
+    ).toBeGreaterThan(0.85);
+  });
+
+  it('顔の平均の深度は動かない（顔だけ空間を移動しない）', () => {
+    const s = faceDepthSurface(flatFace(128, 128, 40), rect);
+    const base = tiltedDepth(0.0002);
+    const out = applyFaceRelief(base, s, rect, G, G, FOCAL);
+    let sb = 0;
+    let sa = 0;
+    let n = 0;
+    for (let y = 0; y < rect.height; y++) {
+      for (let x = 0; x < rect.width; x++) {
+        if ((s.weight[y * rect.width + x] as number) <= 0) continue;
+        const gi = (rect.y + y) * G + rect.x + x;
+        sb += base[gi] as number;
+        sa += out[gi] as number;
+        n++;
+      }
+    }
+    expect(sa / n, '顔が前後に移動しています').toBeCloseTo(sb / n, 5);
+  });
+});
+
 describe('頭だけを見る深度タイル', () => {
   it('頭を囲む正方形を、体のタイルより小さく返す', () => {
     const t = headDepthTile(standingAlpha(), G, G, 120);

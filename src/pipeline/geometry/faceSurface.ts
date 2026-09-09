@@ -45,6 +45,19 @@ const WEIGHT_EDGE = 1.1;
  */
 const TREND_RADIUS_RATIO = 0.5;
 
+/** Shepard 補間で近傍とみなす半径（点間隔の何倍か）。 */
+const CUTOFF_SPACINGS = 2.5;
+/** これだけ点が入るまでは半径を広げる。 */
+const MIN_NEIGHBOURS = 6;
+/**
+ * 顔の傾きを直す上限。**四角の幅いっぱいで動かせる量 ÷ 四角の幅（実寸）**。
+ *
+ * 0.5 なら角度にして ±26.6°。実写で直したい量は 0.30（±16.7°）だったので、
+ * 6 割ほど余裕がある。landmark が壊れたときに顔がひっくり返らない程度に
+ * 抑えつつ、実際に要る量は通す。
+ */
+const MAX_TILT_RATIO = 0.5;
+
 /**
  * マットから顔の初期位置を当てる（頭の外接四角、正方）。
  *
@@ -224,12 +237,80 @@ export interface FaceSurface {
 }
 
 /**
+ * 点を格子に振り分けて、半径の中の点だけを返す入れ物。
+ *
+ * 478 点 × 227² 画素を素直に総当たりすると 2,460 万回になる。近傍だけを
+ * 見るなら格子で足りる。
+ */
+class PointGrid {
+  private readonly cell: number;
+  private readonly x0: number;
+  private readonly y0: number;
+  private readonly cols: number;
+  private readonly rows: number;
+  private readonly buckets: FaceLandmark[][];
+
+  constructor(points: readonly FaceLandmark[], cell: number) {
+    this.cell = cell;
+    let xlo = Infinity;
+    let ylo = Infinity;
+    let xhi = -Infinity;
+    let yhi = -Infinity;
+    for (const p of points) {
+      if (p.x < xlo) xlo = p.x;
+      if (p.x > xhi) xhi = p.x;
+      if (p.y < ylo) ylo = p.y;
+      if (p.y > yhi) yhi = p.y;
+    }
+    this.x0 = xlo;
+    this.y0 = ylo;
+    this.cols = Math.max(1, Math.ceil((xhi - xlo) / cell) + 1);
+    this.rows = Math.max(1, Math.ceil((yhi - ylo) / cell) + 1);
+    this.buckets = Array.from({ length: this.cols * this.rows }, () => [] as FaceLandmark[]);
+    for (const p of points) {
+      const cx = Math.min(this.cols - 1, Math.max(0, Math.floor((p.x - this.x0) / cell)));
+      const cy = Math.min(this.rows - 1, Math.max(0, Math.floor((p.y - this.y0) / cell)));
+      (this.buckets[cy * this.cols + cx] as FaceLandmark[]).push(p);
+    }
+  }
+
+  /** (x, y) から半径 r 以内に**入りうる**点を渡す。半径の確認は呼び出し側。 */
+  forEach(x: number, y: number, r: number, fn: (p: FaceLandmark) => void): void {
+    const lo = (v: number, o: number, n: number): number =>
+      Math.min(n - 1, Math.max(0, Math.floor((v - o) / this.cell)));
+    const cx0 = lo(x - r, this.x0, this.cols);
+    const cx1 = lo(x + r, this.x0, this.cols);
+    const cy0 = lo(y - r, this.y0, this.rows);
+    const cy1 = lo(y + r, this.y0, this.rows);
+    for (let cy = cy0; cy <= cy1; cy++) {
+      for (let cx = cx0; cx <= cx1; cx++) {
+        for (const p of this.buckets[cy * this.cols + cx] as FaceLandmark[]) fn(p);
+      }
+    }
+  }
+}
+
+/**
  * 478 点から顔の連続面を起こす。
  *
  * 三角形分割は使わない。**必要なのは細部の帯だけ**で、大域は深度モデルが
  * 持つので、多少うねっていても最後には効かない。距離の逆数で重みをつけた
  * 散布データ補間（Shepard 法）に、点間隔ぶんの平滑化を掛ければ足りる。
  * 既定のトポロジ表（2,500 三角形）を持ち込まずに済むぶん、配信も軽い。
+ *
+ * **近傍だけを見る（v2.6.8、docs/09 §V23）。** 全点を見る素の Shepard 法は
+ * 面を平らにしてしまう。2 次元では距離 d の点の数が d に比例して増えるので、
+ * 重み 1/d² の総和は遠方が対数で効き続け、**遠くの点の平均**へ引っ張られる。
+ * 実測（立ち姿、478 点、顔 227px）:
+ *
+ * | | z の幅 |
+ * |---|---|
+ * | landmark そのもの | 94.3 px |
+ * | 全点を見る Shepard | **27.3 px（29%）** |
+ * | 近傍だけ見る Shepard | 後述 |
+ *
+ * 起伏として足される量は顔の奥行きの 1.7% しかなく、**鼻も眼窩も出て
+ * いなかった**。半径 `cutoff` の内側だけを見れば、点間隔の尺度の構造が残る。
  *
  * 重みは landmark の広がりから作る楕円で、外へ羽根で落とす。顔の外
  * （髪・耳・首・背景）には触らない。
@@ -271,6 +352,10 @@ export function faceDepthSurface(
   // 点の平均間隔。これより細かい構造は landmark には無い。
   const spacing = Math.max(2, Math.sqrt((Math.PI * rx * ry) / points.length));
   const eps = spacing * spacing * 0.25;
+  // 近傍とみなす半径。点間隔の 2.5 倍あれば、どの向きにも数点入る。
+  const cutoff = spacing * CUTOFF_SPACINGS;
+  const maxReach = Math.max(rx, ry) * 2;
+  const grid = new PointGrid(points, Math.max(2, spacing));
 
   let covered = 0;
   for (let y = 0; y < rect.height; y++) {
@@ -293,15 +378,27 @@ export function faceDepthSurface(
       if (w <= 0) continue;
       covered++;
 
+      // 近傍だけを見る。半径を広げながら、最低 MIN_NEIGHBOURS 点そろうまで探す。
       let acc = 0;
       let wsum = 0;
-      for (const p of points) {
-        const dx = gx - p.x;
-        const dy = gy - p.y;
-        const d2 = dx * dx + dy * dy + eps;
-        const k = power === 2 ? 1 / d2 : 1 / Math.pow(d2, power / 2);
-        acc += k * p.z;
-        wsum += k;
+      let found = 0;
+      for (let r = cutoff; ; r *= 2) {
+        acc = 0;
+        wsum = 0;
+        found = 0;
+        const r2 = r * r;
+        grid.forEach(gx, gy, r, (p) => {
+          const dx = gx - p.x;
+          const dy = gy - p.y;
+          const dd = dx * dx + dy * dy;
+          if (dd > r2) return;
+          const d2 = dd + eps;
+          const k = power === 2 ? 1 / d2 : 1 / Math.pow(d2, power / 2);
+          acc += k * p.z;
+          wsum += k;
+          found++;
+        });
+        if (found >= MIN_NEIGHBOURS || r > maxReach) break;
       }
       depth[i] = wsum > 0 ? acc / wsum : 0;
     }
@@ -399,6 +496,13 @@ export function applyFaceRelief(
   width: number,
   height: number,
   focalPx: number,
+  /**
+   * 顔の傾き（1 次の項）も landmark に合わせるか。
+   *
+   * 既定で入れる。切れるようにしてあるのは、検査で細部だけを見たいときの
+   * ためである。
+   */
+  correctTilt = true,
 ): Float32Array {
   const out = Float32Array.from(depth);
   if (surface.covered < 256 || focalPx <= 0) return out;
@@ -430,6 +534,19 @@ export function applyFaceRelief(
     surface.trendRadius,
   );
 
+  // 顔の傾き（1 次の項）を landmark に合わせる（v2.6.8、docs/09 §V23）。
+  //
+  // **なぜ要るのか。** 深度モデルは顔の向きを取り違える。実写（正面を向いた
+  // 顔）で、深度モデルの面は顔幅 227px にわたって **31mm** 傾いていた。顔幅は
+  // 実寸で 103mm なので、**16° ほど横を向いた顔**になっていたことになる。
+  // 見る側には「片目だけ奥に沈んでいる」「顔の片側が後ろすぎる」と映る。
+  // landmark の面は同じ場所で傾き 0、つまり**正面**だと言っている。
+  //
+  // 位置（0 次）は深度モデルのものを使う。landmark の z は絶対値としては
+  // 当てにならないし、顔がどこにあるかは深度モデルのほうが正しい。
+  // 直すのは向きだけである。
+  const tilt = correctTilt ? tiltFix(depth, surface, rect, width, height, perPixel) : null;
+
   for (let y = 0; y < rect.height; y++) {
     const gy = rect.y + y;
     if (gy < 0 || gy >= height) continue;
@@ -441,10 +558,98 @@ export function applyFaceRelief(
       if (w <= 0) continue;
       const relief = ((surface.depth[ti] as number) - (trend[ti] as number)) * perPixel;
       const gi = gy * width + gx;
-      out[gi] = (depth[gi] as number) + w * relief;
+      const fix = tilt ? tilt(x, y) : 0;
+      out[gi] = (depth[gi] as number) + w * (relief + fix);
     }
   }
   return out;
+}
+
+/** 顔の傾きを landmark に合わせるのに足す量（実寸）。行き過ぎは上限で止める。 */
+function tiltFix(
+  depth: ArrayLike<number>,
+  surface: FaceSurface,
+  rect: Rect,
+  width: number,
+  height: number,
+  perPixel: number,
+): ((x: number, y: number) => number) | null {
+  const plate = fitPlane(rect, surface.weight, (x, y) => {
+    const v = surface.depth[y * rect.width + x] as number;
+    return Number.isFinite(v) ? v * perPixel : Number.NaN;
+  });
+  const model = fitPlane(rect, surface.weight, (x, y) => {
+    const gy = rect.y + y;
+    const gx = rect.x + x;
+    if (gy < 0 || gy >= height || gx < 0 || gx >= width) return Number.NaN;
+    return depth[gy * width + gx] as number;
+  });
+  if (!plate || !model) return null;
+
+  // 傾き [実寸/画素] の上限。四角の幅にわたる変化が
+  // `MAX_TILT_RATIO × 四角の幅（実寸）` を超えないようにする。
+  const limit = MAX_TILT_RATIO * perPixel;
+  const bx = clamp(plate.bx - model.bx, -limit, limit);
+  const by = clamp(plate.by - model.by, -limit, limit);
+  if (bx === 0 && by === 0) return null;
+  // 回す中心は**重みの重心**にする。四角の中心にすると、顔の楕円が四角の
+  // 真ん中に無いぶんだけ顔ぜんたいが前後にずれる。
+  return (x, y) => bx * (x - model.cx) + by * (y - model.cy);
+}
+
+/** 重み付きの平面あてはめ。傾きと、重みの重心を返す。 */
+function fitPlane(
+  rect: Rect,
+  weight: ArrayLike<number>,
+  get: (x: number, y: number) => number,
+): { bx: number; by: number; cx: number; cy: number } | null {
+  let sw = 0;
+  let sx = 0;
+  let sy = 0;
+  let sz = 0;
+  let sxx = 0;
+  let sxy = 0;
+  let syy = 0;
+  let sxz = 0;
+  let syz = 0;
+  for (let y = 0; y < rect.height; y++) {
+    for (let x = 0; x < rect.width; x++) {
+      const w = weight[y * rect.width + x] as number;
+      if (w <= 0) continue;
+      const z = get(x, y);
+      if (!Number.isFinite(z)) continue;
+      sw += w;
+      sx += w * x;
+      sy += w * y;
+      sz += w * z;
+      sxx += w * x * x;
+      sxy += w * x * y;
+      syy += w * y * y;
+      sxz += w * x * z;
+      syz += w * y * z;
+    }
+  }
+  if (sw < 64) return null;
+  const mx = sx / sw;
+  const my = sy / sw;
+  const mz = sz / sw;
+  const cxx = sxx - sw * mx * mx;
+  const cxy = sxy - sw * mx * my;
+  const cyy = syy - sw * my * my;
+  const cxz = sxz - sw * mx * mz;
+  const cyz = syz - sw * my * mz;
+  const det = cxx * cyy - cxy * cxy;
+  if (!(Math.abs(det) > 1e-12)) return null;
+  return {
+    bx: (cxz * cyy - cyz * cxy) / det,
+    by: (cyz * cxx - cxz * cxy) / det,
+    cx: mx,
+    cy: my,
+  };
+}
+
+function clamp(v: number, lo: number, hi: number): number {
+  return v < lo ? lo : v > hi ? hi : v;
 }
 
 /**
