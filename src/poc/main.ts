@@ -9,6 +9,7 @@ import {
   benchRender,
   benchThreads,
   buildPipelineSplats,
+  makeDepthOrderSplats,
   makeProceduralSplats,
   probePixels,
   probeOrientation,
@@ -511,9 +512,10 @@ declare global {
       probeOrientation: typeof probeOrientation;
       createRenderer: typeof createRenderer;
       makeProceduralSplats: typeof makeProceduralSplats;
+      makeDepthOrderSplats: typeof makeDepthOrderSplats;
       buildPipelineSplats: typeof buildPipelineSplats;
       Viewer: typeof Viewer;
     };
   }
 }
-window.__photosplat = { probePixels, probeOrientation, createRenderer, makeProceduralSplats, buildPipelineSplats, Viewer };
+window.__photosplat = { probePixels, probeOrientation, createRenderer, makeProceduralSplats, makeDepthOrderSplats, buildPipelineSplats, Viewer };

@@ -19,6 +19,7 @@
 import splatVert from '../glsl/splat.vert?raw';
 import splatFrag from '../glsl/splat.frag?raw';
 import {
+  SCENE_RADIUS,
   SPLAT_BYTES,
   type RenderStats,
   type SplatRenderer,
@@ -66,8 +67,6 @@ export class Webgl2SplatRenderer implements SplatRenderer {
   private lastSortPitch = Number.NaN;
 
   private view: ViewState = defaultView();
-  private nearZ = 0.5;
-  private farZ = 1.5;
   private width = 1;
   private height = 1;
   private lodStride = 1;
@@ -228,12 +227,6 @@ export class Webgl2SplatRenderer implements SplatRenderer {
     this.view = view;
   }
 
-  setDepthRange(nearZ: number, farZ: number): void {
-    this.nearZ = nearZ;
-    this.farZ = farZ;
-    this.lastSortYaw = Number.NaN;
-  }
-
   setLodStride(stride: number): void {
     const next = Math.max(1, Math.floor(stride));
     if (next !== this.lodStride) this.lastSortYaw = Number.NaN;
@@ -252,8 +245,12 @@ export class Webgl2SplatRenderer implements SplatRenderer {
   /**
    * 背面カリングと深度バケットの計数ソートを CPU で行う（WGSL 版の compute パス相当）。
    *
-   * 被写体が単位立方体に正規化されていて深度レンジが既知なので、基数ソート4パスではなく
-   * 1パスの計数ソートで足りる。バケット幅は被写体1mで約 0.12mm、サーフェル1個より細かい。
+   * 被写体が単位立方体に正規化されているので、基数ソート4パスではなく1パスの計数ソートで
+   * 足りる。バケットは**このフレームのカメラからの距離** [d − R, d + R] で張る
+   * （R は `SCENE_RADIUS`）。幅は被写体1mで約 0.22mm、サーフェル1個より細かい。
+   *
+   * v2.6.7 まではここに「生成時のカメラ（距離 1.0）から見た深度レンジ」を使っていて、
+   * **距離 1.0 以外では全部が 1 バケットに潰れていた**。docs/09 §V22。
    */
   private sort(eye: readonly [number, number, number], viewMat: Float32Array): void {
     const data = this.splatData;
@@ -261,7 +258,8 @@ export class Webgl2SplatRenderer implements SplatRenderer {
 
     this.histogram.fill(0);
     const stride = SPLAT_BYTES;
-    const range = Math.max(this.farZ - this.nearZ, 1e-6);
+    const sortNear = Math.max(1e-3, this.view.distance - SCENE_RADIUS);
+    const range = Math.max(this.view.distance + SCENE_RADIUS - sortNear, 1e-6);
     const n = this.splatCount;
     const step = this.lodStride;
 
@@ -295,7 +293,7 @@ export class Webgl2SplatRenderer implements SplatRenderer {
       const depth = -vz;
       if (!(depth > 0)) { buckets[k] = -1; continue; }
 
-      const t = Math.min(1, Math.max(0, (depth - this.nearZ) / range));
+      const t = Math.min(1, Math.max(0, (depth - sortNear) / range));
       // 遠い→手前 の順に並べたいので反転する
       const b = Math.min(BUCKETS - 1, ((1 - t) * (BUCKETS - 1)) | 0);
       buckets[k] = b;

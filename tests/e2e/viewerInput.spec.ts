@@ -23,7 +23,7 @@ async function mountViewer(page: Page): Promise<{ x: number; y: number; w: numbe
     const viewer = new api.Viewer({ canvas, introAnimation: false });
     await viewer.init();
     const count = 4000;
-    viewer.setSplats(api.makeProceduralSplats(count), count, 0.6, 1.4);
+    viewer.setSplats(api.makeProceduralSplats(count), count);
     (window as unknown as Record<string, unknown>)['__v'] = viewer;
 
     const r = canvas.getBoundingClientRect();

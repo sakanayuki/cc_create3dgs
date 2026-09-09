@@ -184,7 +184,7 @@ async function run(file: File): Promise<void> {
         $('refining').hidden = false;
         $('stats').innerHTML = '';
         viewer.resize();
-        viewer.setSplats(b.data, b.count, b.nearZ, b.farZ);
+        viewer.setSplats(b.data, b.count);
       },
       }),
     );
@@ -193,7 +193,7 @@ async function run(file: File): Promise<void> {
     show('view');
     $('refining').hidden = true;
     viewer.resize();
-    viewer.setSplats(result.build.data, result.build.count, result.build.nearZ, result.build.farZ);
+    viewer.setSplats(result.build.data, result.build.count);
 
     const t = result.stats.timings;
     const total = Object.values(t).reduce((a, b) => a + b, 0);

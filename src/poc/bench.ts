@@ -362,6 +362,48 @@ export interface RenderBenchResult {
 }
 
 /** 球殻状にサーフェルを撒く。前面／背面シェルの向きの分布を模す。 */
+/**
+ * 深度ソートの検査用の場面（docs/09 §V22）。
+ *
+ * カメラ側に**赤**、その奥に**青**の、どちらも不透明な板を平行に置く。
+ * どの距離から見ても赤しか見えないはずで、青が混じったらソートが壊れている。
+ * 法線はどちらもカメラを向けるので、背面カリングでは落ちない。
+ *
+ * @param side 一辺あたりの枚数。side² × 2 枚を返す。
+ */
+export function makeDepthOrderSplats(side = 64): Uint8Array {
+  const count = side * side * 2;
+  const buf = new ArrayBuffer(count * SPLAT_BYTES);
+  const f32 = new Float32Array(buf);
+  const u32 = new Uint32Array(buf);
+  const stride = SPLAT_BYTES / 4;
+  const half = 0.35;
+  const step = (2 * half) / (side - 1);
+  // 隙間なく覆う。隣どうしが 1.2 倍重なる大きさにする。
+  const radius = step * 0.6;
+
+  let k = 0;
+  for (const [z, r, g, b] of [
+    [-0.3, 255, 0, 0],
+    [0.3, 0, 0, 255],
+  ] as const) {
+    for (let iy = 0; iy < side; iy++) {
+      for (let ix = 0; ix < side; ix++) {
+        const o = k * stride;
+        f32[o] = -half + ix * step;
+        f32[o + 1] = -half + iy * step;
+        f32[o + 2] = z;
+        // カメラは −Z 側にいる。両方ともカメラを向ける。
+        u32[o + 3] = encodeOct(0, 0, -1);
+        u32[o + 4] = packHalf2(radius, radius);
+        u32[o + 5] = packRgba8(r, g, b, 255);
+        k++;
+      }
+    }
+  }
+  return new Uint8Array(buf);
+}
+
 export function makeProceduralSplats(count: number): Uint8Array {
   const buf = new ArrayBuffer(count * SPLAT_BYTES);
   const f32 = new Float32Array(buf);
@@ -450,7 +492,6 @@ export async function probeOrientation(
 
     renderer.resize(size, size);
     renderer.setSplats(new Uint8Array(buf), count);
-    renderer.setDepthRange(0.5, 1.6);
     renderer.setCamera({ yaw: 0, pitch: 0, distance: 1.0, target: [0, 0, 0] });
     for (let i = 0; i < 2; i++) {
       renderer.render();
@@ -494,7 +535,6 @@ export async function benchRender(
   try {
     renderer.resize(canvas.clientWidth * devicePixelRatio || 720, canvas.clientHeight * devicePixelRatio || 720);
     renderer.setSplats(makeProceduralSplats(splatCount), splatCount);
-    renderer.setDepthRange(0.5, 1.6);
 
     // 最初の数フレームはシェーダ準備で遅いので捨てる。frames が小さいときは割合で決める。
     const warmup = Math.min(20, Math.max(2, Math.floor(frames * 0.25)));
@@ -566,7 +606,6 @@ export async function probePixels(
   try {
     renderer.resize(size, size);
     renderer.setSplats(makeProceduralSplats(splatCount), splatCount);
-    renderer.setDepthRange(0.5, 1.6);
     renderer.setCamera({ yaw: 0, pitch: 0, distance: 1.0, target: [0, 0, 0] });
 
     // シェーダとバッファの準備を済ませてから本番の1フレームを描く。

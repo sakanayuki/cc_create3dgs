@@ -181,10 +181,9 @@ export class Viewer {
     this.loop();
   }
 
-  setSplats(data: ArrayBufferView, count: number, nearZ: number, farZ: number): void {
+  setSplats(data: ArrayBufferView, count: number): void {
     if (!this.renderer) return;
     this.renderer.setSplats(data, count);
-    this.renderer.setDepthRange(nearZ, farZ);
     this.dirty = true;
     if (this.opts.introAnimation !== false) {
       this.intro = performance.now();

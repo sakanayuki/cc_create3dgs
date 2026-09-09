@@ -211,3 +211,86 @@ test.describe('描画のピクセル検証', () => {
     expect(Math.abs(gpu.coverage - gl.coverage)).toBeLessThan(0.05);
   });
 });
+
+/**
+ * 深度ソートが**どのカメラ距離でも**効くか（docs/09 §V22）。
+ *
+ * v2.6.7 まで、ソートのバケットは「生成時のカメラ（距離 1.0）から見た深度
+ * レンジ」で張られていた。寄る・引くとカメラからの距離がそのレンジを外れ、
+ * **全部が 1 バケットに潰れて順序が消える**。α 合成は順序に依存するので、
+ * 奥の面が手前に出て「透けて」見える。実測では距離 0.6 以下・1.4 以上で
+ * 8192 バケット中 1 個しか使われていなかった。
+ *
+ * 手前に赤・奥に青の不透明な板を置き、どの距離でも赤しか見えないことを見る。
+ */
+test.describe('深度ソート（docs/09 §V22）', () => {
+  for (const backend of ['webgl2', 'webgpu'] as const) {
+    test(`${backend}: どの距離でも手前の面が勝つ`, async ({ page }) => {
+      await page.goto('/poc.html');
+      await expect(page.locator('#cap .pill')).toBeVisible({ timeout: 30_000 });
+
+      const result = await page.evaluate(async (be: string) => {
+        const api = window.__photosplat;
+        if (!api) throw new Error('__photosplat がページに露出していません');
+        if (be === 'webgpu') {
+          if (!('gpu' in navigator) || !navigator.gpu) return null;
+          if (!(await navigator.gpu.requestAdapter().catch(() => null))) return null;
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = 128;
+        canvas.height = 128;
+        const made = await api.createRenderer({
+          canvas,
+          force: be as 'webgl2' | 'webgpu',
+        });
+        if (made.backend !== be) return null;
+        const renderer = made.renderer;
+        const side = 64;
+        renderer.resize(128, 128);
+        renderer.setSplats(api.makeDepthOrderSplats(side), side * side * 2);
+        renderer.setCamera({ yaw: 0, pitch: 0, distance: 1.0, target: [0, 0, 0] });
+        // シェーダとバッファの準備を済ませてから測る（probePixels と同じ順序）。
+        for (let i = 0; i < 2; i++) {
+          renderer.render();
+          await renderer.flush();
+        }
+        const out: { distance: number; red: number; blue: number }[] = [];
+        const list = [0.45, 0.7, 1.0, 1.35, 1.65];
+        for (let i = 0; i < list.length; i++) {
+          const distance = list[i] as number;
+          // WebGL2 は「回転が小さければ前回の順序を使い回す」ので、距離だけ
+          // 変えると古い順序のまま描いてしまい、不具合を素通りしてしまう。
+          // 距離ごとに向きも変えて、その距離で必ず並べ直させる。
+          const yaw = i % 2 === 0 ? 0.12 : -0.12;
+          renderer.setCamera({ yaw, pitch: 0, distance, target: [0, 0, 0] });
+          renderer.render();
+          await renderer.flush();
+          renderer.render();
+          const px = await renderer.readPixels();
+          let red = 0;
+          let blue = 0;
+          for (let i = 0; i < px.length; i += 4) {
+            if ((px[i + 3] as number) < 16) continue;
+            red += px[i] as number;
+            blue += px[i + 2] as number;
+          }
+          out.push({ distance, red, blue });
+        }
+        renderer.dispose();
+        return out;
+      }, backend);
+
+      if (result === null) {
+        test.skip(true, `${backend} が使えない環境です`);
+        return;
+      }
+      for (const { distance, red, blue } of result) {
+        expect(red, `距離 ${distance} で手前の赤が出ていません`).toBeGreaterThan(0);
+        expect(
+          blue / Math.max(red, 1),
+          `距離 ${distance} で奥の青が ${((100 * blue) / Math.max(red, 1)).toFixed(1)}% 混じっています`,
+        ).toBeLessThan(0.05);
+      }
+    });
+  }
+});

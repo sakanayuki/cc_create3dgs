@@ -61,8 +61,6 @@ export interface SplatRenderer {
   /** 描画対象を差し替える。プレビュー確定時と微調整完了時に呼ばれる。 */
   setSplats(data: ArrayBufferView, count: number): void;
   setCamera(view: ViewState): void;
-  /** 深度レンジ。ソートのバケット割り当てに使う。 */
-  setDepthRange(nearZ: number, farZ: number): void;
   render(): void;
   /**
    * 直前の render() の GPU 側の完了を待つ。
@@ -84,6 +82,22 @@ export interface SplatRenderer {
   dispose(): void;
   readonly stats: RenderStats;
 }
+
+/**
+ * 正規化された被写体を包む球の半径（docs/06 §6.5）。
+ *
+ * ⑥ は被写体を**一辺 1 の立方体**に収めて出す（`6-splats.ts` の `extent`）。
+ * その半対角は √3/2 = 0.866 なので、少し余裕を見て 0.9 とする。
+ *
+ * **深度ソートのバケットはこの半径で張る。** カメラからの距離 d に対して
+ * [d − R, d + R] を 8192 等分すれば、どの距離でも被写体全体が入る。
+ * v2.6.7 まではここに「生成時のカメラ（距離 1.0）から見た深度レンジ」を
+ * 使っていて、**距離 1.0 以外では全部が 1 バケットに潰れていた**
+ * （実測: 距離 0.6 以下・1.4 以上で 8192 個中 1 個しか使われない）。
+ * ソートが効かないと α 合成の順序が乱れ、奥の面が手前に出て**透けて**見える。
+ * docs/09 §V22。
+ */
+export const SCENE_RADIUS = 0.9;
 
 /** 単位立方体に正規化された被写体を見るカメラの既定値。 */
 export function defaultView(): ViewState {

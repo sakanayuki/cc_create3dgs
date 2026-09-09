@@ -65,7 +65,6 @@ async function shoot(
       try {
         renderer.resize(size, size);
         renderer.setSplats(built.data, built.count);
-        renderer.setDepthRange(built.nearZ, built.farZ);
         renderer.setCamera({ yaw: y, pitch: 0.1, distance: 1.0, target: [0, 0, 0] });
         for (let i = 0; i < 2; i++) {
           renderer.render();

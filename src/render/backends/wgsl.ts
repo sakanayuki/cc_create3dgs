@@ -12,6 +12,7 @@ import commonWgsl from '../wgsl/common.wgsl?raw';
 import sortWgsl from '../wgsl/sort.wgsl?raw';
 import splatWgsl from '../wgsl/splat.wgsl?raw';
 import {
+  SCENE_RADIUS,
   SPLAT_BYTES,
   type RenderStats,
   type SplatRenderer,
@@ -58,8 +59,6 @@ export class WgslSplatRenderer implements SplatRenderer {
   private readonly renderLayout: GPUBindGroupLayout;
 
   private view: ViewState = defaultView();
-  private nearZ = 0.5;
-  private farZ = 1.5;
   private width = 1;
   private height = 1;
   private lodStride = 1;
@@ -208,11 +207,6 @@ export class WgslSplatRenderer implements SplatRenderer {
     this.view = view;
   }
 
-  setDepthRange(nearZ: number, farZ: number): void {
-    this.nearZ = nearZ;
-    this.farZ = farZ;
-  }
-
   resize(width: number, height: number): void {
     this.width = Math.max(1, Math.floor(width));
     this.height = Math.max(1, Math.floor(height));
@@ -253,8 +247,11 @@ export class WgslSplatRenderer implements SplatRenderer {
     f[35] = this.height / (2 * Math.tan(fovY / 2)); // focalPx
     f[36] = this.width;
     f[37] = this.height;
-    f[38] = this.nearZ;
-    f[39] = this.farZ;
+    // ソートのバケットは「このフレームのカメラからの距離」で張る（docs/09 §V22）。
+    // 生成時のカメラ（距離 1.0）の深度レンジを使うと、寄ったり引いたりした
+    // 途端に全部が 1 バケットに潰れ、ソートが効かなくなる。
+    f[38] = Math.max(1e-3, distance - SCENE_RADIUS);
+    f[39] = distance + SCENE_RADIUS;
     f[40] = this.cullCos;
     f[41] = this.filter2d;
     u[42] = this.splatCount;
