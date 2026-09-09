@@ -976,3 +976,84 @@ describe('輪郭の行き過ぎを引き戻す（v2.6.4）', () => {
     expect(at(50) - at(64), `丸みが ${at(50) - at(64)} しか残っていません`).toBeGreaterThan(500);
   });
 });
+
+/**
+ * 強調を顔と体で分ける（docs/11 §11.6 S1）。
+ *
+ * 強調は顔の凹凸を出すための処理で、体では「あり得ない起伏」を作る側に
+ * 働く。実写で体を 1 倍にすると横断面の飛び出しの 99% が 13.83% → 9.11%
+ * に下がり、顔の奥行きは保たれた。
+ */
+describe('強調を顔と体で分ける（v2.6.6）', () => {
+  const W = 128;
+  const H = 128;
+  const FOCAL = 400;
+
+  /** 全面が被写体。細かい凹凸（周期 12px）を一様に入れた深度。 */
+  function wrinkled(): { raw: Float32Array; alpha: Uint8ClampedArray } {
+    const raw = new Float32Array(W * H);
+    const alpha = new Uint8ClampedArray(W * H).fill(255);
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        raw[y * W + x] = 1 + 0.004 * Math.sin((x * 2 * Math.PI) / 12) * Math.sin((y * 2 * Math.PI) / 12);
+      }
+    }
+    return { raw, alpha };
+  }
+
+  /** 四角の中の凹凸の振れ幅（0..65535 の深度で測る）。 */
+  function ripple(d: Uint16Array, x0: number, y0: number, side: number): number {
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (let y = y0 + 4; y < y0 + side - 4; y++) {
+      for (let x = x0 + 4; x < x0 + side - 4; x++) {
+        const v = d[y * W + x] as number;
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+      }
+    }
+    return hi - lo;
+  }
+
+  it('顔の箱の中だけ強調が残る', () => {
+    const { raw, alpha } = wrinkled();
+    const faceBox = { x: 8, y: 8, width: 40, height: 40 };
+    const both = calibrate({ raw, width: W, height: H, alpha, kind: 'depth', focalPx: FOCAL });
+    const split = calibrate({
+      raw,
+      width: W,
+      height: H,
+      alpha,
+      kind: 'depth',
+      focalPx: FOCAL,
+      faceBox,
+      reliefBoostBody: 1,
+    });
+    // 箱の中（顔）と、箱から十分離れた所（体）
+    const faceBoth = ripple(both.depth, 8, 8, 40);
+    const faceSplit = ripple(split.depth, 8, 8, 40);
+    const bodyBoth = ripple(both.depth, 80, 80, 40);
+    const bodySplit = ripple(split.depth, 80, 80, 40);
+    // 体は明らかに小さくなる
+    expect(bodySplit / bodyBoth, `体の起伏が ${(bodySplit / bodyBoth).toFixed(2)} 倍`).toBeLessThan(0.75);
+    // 顔は体より強く残る
+    expect(faceSplit / bodySplit, `顔 ÷ 体 = ${(faceSplit / bodySplit).toFixed(2)}`).toBeGreaterThan(1.3);
+    // 顔そのものは大きく落ちない
+    expect(faceSplit / faceBoth, `顔の起伏が ${(faceSplit / faceBoth).toFixed(2)} 倍`).toBeGreaterThan(0.7);
+  });
+
+  it('顔の箱を渡さなければ従来どおり全面に効く', () => {
+    const { raw, alpha } = wrinkled();
+    const a = calibrate({ raw, width: W, height: H, alpha, kind: 'depth', focalPx: FOCAL });
+    const b = calibrate({
+      raw,
+      width: W,
+      height: H,
+      alpha,
+      kind: 'depth',
+      focalPx: FOCAL,
+      reliefBoostBody: 1,
+    });
+    expect(ripple(b.depth, 80, 80, 40)).toBe(ripple(a.depth, 80, 80, 40));
+  });
+});

@@ -10,6 +10,7 @@
  * V2 経路のシフト b は**シルエット法線の事前分布**から推定する。
  */
 import { distanceTransform, nearestForegroundIndex } from './geometry/distanceTransform';
+import type { Rect } from './0-preprocess';
 
 export type DepthOutputKind = 'depth' | 'inverse-depth';
 
@@ -50,6 +51,24 @@ export interface CalibrationInput {
    * 大域の形（＝実寸の比率）は保ったまま、細かい起伏だけを持ち上げる。
    */
   readonly reliefBoost?: number;
+  /**
+   * 顔の外での強調倍率（v2.6.6、docs/11 §11.6 S1）。
+   *
+   * 強調は顔のためのものである。体では**あり得ない起伏を作る側に働く**。
+   * 実測（立ち姿、docs/11 §11.2）で、強調を切ると横断面の飛び出しの
+   * 99 パーセンタイルが 13.83% → 9.29%、胸の奥行き÷幅が 0.46 → 0.35
+   * （参照実装 0.25）に下がった。一方で顔も浅くなる（頭 0.45 → 0.39）
+   * ので、一律に切ることはできない。
+   *
+   * `faceBox` を渡すと、その中は `reliefBoost`、外はこの値になる。
+   * 省略時は `reliefBoost` と同じ（v2.6.5 までの挙動）。
+   */
+  readonly reliefBoostBody?: number;
+  /**
+   * 顔の箱（作業グリッド座標）。`reliefBoostBody` と組で使う。
+   * 箱の外へは半径ぶんの羽根で滑らかに移る。
+   */
+  readonly faceBox?: Rect | null;
   /** 局所強調の平滑化半径。被写体の短辺に対する割合。 */
   readonly reliefRadius?: number;
 }
@@ -681,8 +700,14 @@ export function enhanceRelief(
    * 幅を広げても内部の起伏は減らない。輪だけが消える。
    */
   rimBand = 0,
+  /**
+   * 画素ごとの倍率を作る関数（v2.6.6）。渡すと `boost` の代わりに使う。
+   * 顔の中だけ強く、体では弱く、といった使い分けのため。
+   */
+  boostAt: ((i: number) => number) | null = null,
 ): Float32Array {
-  if (boost <= 1 || radius < 1) return z;
+  const maxBoost = boostAt ? Math.max(boost, 1.0001) : boost;
+  if (maxBoost <= 1 || radius < 1) return z;
 
   // 帯域を絞って持ち上げる。
   //
@@ -718,8 +743,9 @@ export function enhanceRelief(
     const f = fine[i] as number;
     // 立ち上がりは滑らかに。直線だと倍率の折れ目がそのまま深度の折れ目に
     // なる（実測で輪の高さが 0.0019 → 0.0012 に下がった）。
+    const here = boostAt ? boostAt(i) : boost;
     const t = rim ? Math.min(1, (rim[i] as number) / rimBand) : 1;
-    const k = rim ? 1 + (boost - 1) * t * t * (3 - 2 * t) : boost;
+    const k = rim ? 1 + (here - 1) * t * t * (3 - 2 * t) : here;
     out[i] = b + (f - b) * k + ((z[i] as number) - f);
   }
   return out;
@@ -824,6 +850,39 @@ function silhouetteDistance(
     if (!any) break;
   }
   return dist;
+}
+
+/**
+ * 顔の中と外で強調倍率を変える（v2.6.6、docs/11 §11.6 S1）。
+ *
+ * 強調は顔のためのものである。体では**あり得ない起伏を作る側に働く**
+ * （docs/11 §11.2）。箱の外へは平滑化半径ぶんの羽根で移す。倍率が
+ * 段差になると、そこがそのまま深度の段差になるため。
+ *
+ * @returns 画素ごとの倍率を返す関数。分ける必要が無ければ null。
+ */
+function faceBoostAt(
+  box: Rect | null,
+  faceBoost: number,
+  bodyBoost: number,
+  width: number,
+  featherPx: number,
+): ((i: number) => number) | null {
+  if (!box || faceBoost === bodyBoost) return null;
+  const feather = Math.max(1, featherPx);
+  return (i: number): number => {
+    const x = i % width;
+    const y = (i / width) | 0;
+    // 箱からの距離（中は 0）
+    const dx = Math.max(box.x - x, x - (box.x + box.width - 1), 0);
+    const dy = Math.max(box.y - y, y - (box.y + box.height - 1), 0);
+    const d = Math.hypot(dx, dy);
+    if (d <= 0) return faceBoost;
+    if (d >= feather) return bodyBoost;
+    const t = d / feather;
+    const s = t * t * (3 - 2 * t);
+    return faceBoost + (bodyBoost - faceBoost) * s;
+  };
 }
 
 /**
@@ -936,7 +995,16 @@ export function calibrate(input: CalibrationInput): CalibrationResult {
   // 上がるのは顔の凹凸や服のしわだけ。大域の形（＝体の奥行きの比率）は
   // 変えない。輪郭の帯では強調を 1 倍へ落とす（②.5 参照）。
   const beforeBoost = subjectExtent(z, alpha, extentMask);
-  z = enhanceRelief(z, alpha, width, height, radius, boost, boostBand);
+  z = enhanceRelief(
+    z,
+    alpha,
+    width,
+    height,
+    radius,
+    boost,
+    boostBand,
+    faceBoostAt(input.faceBox ?? null, boost, input.reliefBoostBody ?? boost, width, radius),
+  );
 
   // 強調は「平滑化からのずれ」を倍にするので、切り残した外れ値も倍になる。
   // クリップの縁に張り付いた画素が、強調後に大きく飛び出す。もう一度

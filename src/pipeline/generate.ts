@@ -175,6 +175,18 @@ async function loadModel(
  */
 const BOUNDARY_BAND_RATIO = 0.012;
 
+/**
+ * 顔の外での局所強調の倍率（docs/11 §11.6 S1）。
+ *
+ * 強調（`reliefBoost`、既定 3）は顔の凹凸を出すための処理で、体では
+ * **あり得ない起伏を作る側に働く**。実測（立ち姿）で、体を 1 倍にすると
+ * 横断面の飛び出しの 99 パーセンタイルが **13.83% → 9.11%**、首肩の
+ * 奥行き÷幅が 0.43 → 0.54（参照実装 0.55）になり、顔は 0.45 → 0.51
+ * （参照実装 0.47）と保たれた。至近距離の描画の勾配も 2.50 → 2.69 で
+ * 落ちない。
+ */
+const BODY_RELIEF_BOOST = 1;
+
 const AUX_BACKEND: Backend = 'wasm';
 
 /** セッションの入力名は1つとは限らないので、最初の1つに入れる。 */
@@ -842,6 +854,9 @@ export async function generate(photo: Blob, options: GenerateOptions): Promise<G
   }
 
   report(0.62, '奥行きを整えています');
+  // 局所強調は顔のためのもの。体に掛けるとあり得ない起伏を作る側に働く
+  // （docs/11 §11.2）。人物のときだけ顔の箱を渡して、外は 1 倍にする。
+  const boostBox = opts.mode === 'person' ? headBoxFromMatte(alpha, grid, grid) : null;
   const calibrated = await mark('深度較正', () =>
     calibrate({
       raw: depthRaw,
@@ -850,6 +865,7 @@ export async function generate(photo: Blob, options: GenerateOptions): Promise<G
       alpha,
       kind: depthOut.kind,
       focalPx,
+      ...(boostBox ? { faceBox: boostBox, reliefBoostBody: BODY_RELIEF_BOOST } : {}),
     }),
   );
 
