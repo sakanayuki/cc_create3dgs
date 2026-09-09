@@ -905,3 +905,74 @@ describe('輪郭に沿った隆起（アンシャープのハロ、v2.6）', () 
     ).toBeGreaterThan(at(wide));
   });
 });
+
+/**
+ * 細い部位の輪郭が内部より手前へ行き過ぎる（docs/09 §V19）。
+ *
+ * 深度モデルは深度の段差の**手前側で行き過ぎる**。実写（立ち姿）で、脛の
+ * 輪郭が内部より 18.7mm 手前に出ていた。にじみの帯は 10px あたりまで
+ * 届くので、8px の引き込みでは取り切れない。
+ */
+describe('輪郭の行き過ぎを引き戻す（v2.6.4）', () => {
+  const W = 128;
+  const H = 32;
+
+  /** 幅 40px の縦棒（脚を模す）。断面は円柱で、縁 10px だけ手前へ行き過ぎている。 */
+  function limb(overshootPx: number): { depth: Uint16Array; alpha: Uint8ClampedArray } {
+    const depth = new Uint16Array(W * H);
+    const alpha = new Uint8ClampedArray(W * H);
+    const x0 = 44;
+    const half = 20;
+    for (let y = 0; y < H; y++) {
+      for (let x = x0; x < x0 + 2 * half; x++) {
+        const i = y * W + x;
+        alpha[i] = 255;
+        const t = (x - (x0 + half)) / half; // −1..1
+        // 円柱の断面。中央が手前（値が小さい）。
+        const cyl = 30000 + 6000 * (1 - Math.sqrt(Math.max(0, 1 - t * t)));
+        const edge = Math.min(x - x0, x0 + 2 * half - 1 - x);
+        // 縁 overshootPx だけ、内部の最前面よりさらに手前へ飛び出す
+        depth[i] = edge < overshootPx ? 24000 : Math.round(cyl);
+      }
+    }
+    return { depth, alpha };
+  }
+
+  /** 輪郭の帯と内部（輪郭から 14px 以上）の中央値の差。負なら輪郭が手前。 */
+  function contourMinusCore(depth: Uint16Array): number {
+    const x0 = 44;
+    const half = 20;
+    const band: number[] = [];
+    const core: number[] = [];
+    for (let y = 0; y < H; y++) {
+      for (let x = x0; x < x0 + 2 * half; x++) {
+        const edge = Math.min(x - x0, x0 + 2 * half - 1 - x);
+        const v = depth[y * W + x] as number;
+        if (edge < 3) band.push(v);
+        else if (edge >= 14) core.push(v);
+      }
+    }
+    const med = (a: number[]): number => a.sort((p, q) => p - q)[a.length >> 1] as number;
+    return med(band) - med(core);
+  }
+
+  it('8px では取り切れず、12px なら輪郭が内部より奥に戻る', () => {
+    const { depth, alpha } = limb(10);
+    const before = contourMinusCore(depth);
+    expect(before, `直す前の輪郭 ${before}`).toBeLessThan(-3000);
+
+    const at8 = contourMinusCore(pullBoundaryDepthInward(depth, alpha, W, H, 8));
+    const at12 = contourMinusCore(pullBoundaryDepthInward(depth, alpha, W, H, 12));
+    expect(at8, `8px では輪郭がまだ ${at8}`).toBeLessThan(0);
+    expect(at12, `12px でも輪郭が手前のまま ${at12}`).toBeGreaterThanOrEqual(0);
+  });
+
+  it('引き戻しても断面の丸みは残る', () => {
+    const { depth, alpha } = limb(10);
+    const out = pullBoundaryDepthInward(depth, alpha, W, H, 12);
+    const at = (x: number): number => out[16 * W + x] as number;
+    // 中央（x=64）が最も手前、内部の縁寄り（x=50）はそれより奥
+    expect(at(64), '中央が手前ではありません').toBeLessThan(at(50));
+    expect(at(50) - at(64), `丸みが ${at(50) - at(64)} しか残っていません`).toBeGreaterThan(500);
+  });
+});

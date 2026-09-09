@@ -165,6 +165,15 @@ async function loadModel(
  * どちらも小さい（320² と 256²）ので、WASM で回しても待ち時間に響かない。
  * 重い DA3・MODNet・MI-GAN は WebGPU のままにする。
  */
+/**
+ * 境界の深度を引き込む帯の幅（作業グリッドに対する割合）。
+ *
+ * 深度モデルは輪郭で前景と背景を混ぜた値を返し、そのにじみは α が 1 の
+ * 内側にも続く。帯の広さはモデルの推論解像度で決まるので、被写体の
+ * 大きさではなくグリッドに対する割合で置く。docs/09 §V1・§V19。
+ */
+const BOUNDARY_BAND_RATIO = 0.012;
+
 const AUX_BACKEND: Backend = 'wasm';
 
 /** セッションの入力名は1つとは限らないので、最初の1つに入れる。 */
@@ -847,9 +856,13 @@ export async function generate(photo: Blob, options: GenerateOptions): Promise<G
   // 見えている。その深度をそのまま使うと、髪が後ろへ長く尾を引く。
   // 最も近い不透明画素の深度で置き換える（docs/03 §3.5.3(c)）。
   // にじみの帯はモデルの推論解像度（518²）で決まるので、作業グリッドに
-  // 対する割合で置く。1024² なら 8px。実測では 8px で最奥張り付きが
-  // 56% → 6.6% まで落ちる。
-  const boundaryBand = Math.max(2, Math.round(grid * 0.008));
+  // 対する割合で置く。1024² なら 12px（v2.6.4、docs/09 §V19）。
+  //
+  // v2.6.3 まで 8px にしていたが、にじみは 10px あたりまで届いている。
+  // 細い部位（脛）では、はみ出した帯が輪郭を内部より **18.7mm 手前**へ
+  // 押し出していた。12px にすると −18.7mm → −0.4mm になり、断面の丸みは
+  // 参照実装と同じところに収まる（幅比 0.99 → 0.33、参照実装 0.20）。
+  const boundaryBand = Math.max(2, Math.round(grid * BOUNDARY_BAND_RATIO));
   const pulled = await mark('境界深度の引き込み', () =>
     pullBoundaryDepthInward(calibrated.depth, alpha, grid, grid, boundaryBand),
   );
