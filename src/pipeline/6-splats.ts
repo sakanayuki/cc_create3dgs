@@ -145,6 +145,13 @@ export interface SplatBuild {
   readonly skirtCount: number;
   /** 正規化に使った変換。背面シェルやスカートを後から足すのに要る。 */
   readonly normalization: Normalization;
+  /**
+   * 被写体の縦の広がり（正規化する前の、深度モデルの実寸単位）。
+   *
+   * 書き出しを実寸へ直すときの物差しにする。深度モデルの絶対値は当てに
+   * ならないので（docs/09 §V25）、これを「人の身長」と突き合わせて倍率を出す。
+   */
+  readonly metricHeight: number;
   /** ワールド空間での深度レンジ。レンダラの setDepthRange に渡す。 */
   readonly nearZ: number;
   readonly farZ: number;
@@ -551,6 +558,7 @@ export function buildSplats(
     backCount,
     skirtCount,
     normalization,
+    metricHeight: Math.max(maxY - minY, 0),
     nearZ: Number.isFinite(outNear) ? outNear : 0.5,
     farZ: Number.isFinite(outFar) ? outFar : 1.5,
   };

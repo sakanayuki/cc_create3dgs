@@ -80,6 +80,12 @@ export interface GenerateOptions {
   readonly inpaint?: boolean;
   /** ② のタイルパスを行うか。軽量プリセットは false（docs/04 §4.7）。 */
   readonly depthTiles?: boolean;
+  /**
+   * ⑥⑦ を回すグリッドを作業グリッドの何倍にするか（docs/03 §3.6.4）。
+   *
+   * 省略すると `FINE_GRID_RATIO`。高品質プリセットは 2.0（元写真の解像度）。
+   */
+  readonly fineGridRatio?: number;
 }
 
 /**
@@ -100,6 +106,13 @@ export const DEFAULT_GENERATE_OPTIONS: Omit<GenerateOptions, 'backend'> = {
 
 export interface GenerateResult {
   readonly build: SplatBuild;
+  /**
+   * 書き出しを実寸へ直す倍率（`SplatBuild.normalization` を戻したあとに掛ける）。
+   *
+   * 人物モードでは「立ち姿の身長 1.65m」を仮定して求める。物体モードと、
+   * 仮定が使えないときは 1（深度モデルの値をそのまま使う）。docs/09 §V25。
+   */
+  readonly metricFix: number;
   readonly box: Letterbox;
   /** 作業グリッド上の各プレーン。書き出し（.pgs）で使う。 */
   readonly planes: {
@@ -799,6 +812,67 @@ async function runInpaint(
  */
 const FINE_GRID_RATIO = 1.5;
 
+/**
+ * 高品質プリセットの倍率。**元写真の画素 1 個につきスプラット 1 枚**まで上げる。
+ *
+ * 1116×2000 の写真を 1024² に載せると中身は 571×1024 なので、2.0 倍で
+ * 1142×2048 = 元写真とほぼ等倍になる。これが上限で、ここから先へ上げても
+ * 色の情報は増えない（引き伸ばすだけ）。
+ *
+ * **実測**（同じ写真、reduction 0）:
+ *
+ * | 倍率 | 中身 | 枚数 | `.splat` | 至近の勾配 | 至近の穴 | ⑥⑦＋法線 |
+ * |---|---|---|---|---|---|---|
+ * | 1.5 | 元写真の 0.77 倍 | 524k | 16.8MB | 4.92 | 0.42% | 4.5 s |
+ * | 1.75 | 同 0.90 倍 | 713k | 22.8MB | 5.41 | 0.15% | — |
+ * | **2.0** | 同 **1.02 倍** | **930k** | **29.8MB** | **6.02** | **0.01%** | **9.1 s** |
+ * | 参照実装 | — | 473k | — | 10.97 | 0.01% | — |
+ *
+ * 至近（胴を 0.12 単位に切る）で見える**格子の隙間が 0.42% → 0.01%** になり、
+ * 参照実装と同じところまで詰まる。代償は枚数 1.8 倍・ファイル 1.8 倍・
+ * ⑥⑦ の時間 2.0 倍で、**10 秒の予算（D4・D13）はほぼ使い切る**。
+ * だから既定（標準プリセット）は 1.5 のままにして、ここは高品質だけにする。
+ */
+const FINE_GRID_RATIO_HIGH = 2.0;
+
+/**
+ * 立ち姿の人物の身長として仮定する値（メートル）。
+ *
+ * **なぜ仮定が要るのか。** DA3 は実寸の深度を返すことになっているが、
+ * **絶対値が当てにならない**（docs/09 §V25）。実測（別々の 3 枚、焦点距離も
+ * ばらばら）:
+ *
+ * | | 焦点[px] | 距離の中央[m] | 被写体[px] | 出てくる身長[m] |
+ * |---|---|---|---|---|
+ * | A | 1468 | 0.671 | 932 | **0.43** |
+ * | B | 1203 | 0.548 | 969 | **0.44** |
+ * | C | 1075 | 0.553 | 899 | **0.46** |
+ *
+ * どれも「立っている人が 44cm」になる。形（相対関係）は使えるが、
+ * 絶対の大きさは別に決めるしかない。
+ *
+ * **これは推定であって実測ではない。** 書き出したファイルの寸法を測って
+ * 「この人は 165cm だ」と読んではいけない。バストアップの切り抜きのように
+ * 縦の広がりが身長でない写真では外れる。
+ */
+export const ASSUMED_STATURE_M = 1.65;
+
+/** 身長の仮定から出す倍率の許容範囲。これを外れたら仮定を使わない。 */
+const METRIC_FIX_RANGE: readonly [number, number] = [0.2, 50];
+
+/**
+ * 身長の仮定から、書き出しを実寸へ直す倍率を出す。
+ *
+ * 物体モードでは仮定できるものが無いので 1 を返す（深度モデルの値のまま）。
+ */
+export function statureFix(mode: SubjectMode, metricHeight: number): number {
+  if (mode !== 'person' || !(metricHeight > 0)) return 1;
+  const fix = ASSUMED_STATURE_M / metricHeight;
+  const [lo, hi] = METRIC_FIX_RANGE;
+  // 桁が違うときは深度較正が壊れている。仮定を重ねず、そのまま出す。
+  return fix >= lo && fix <= hi ? fix : 1;
+}
+
 /** 画角 55° を仮定したときの焦点距離。モデルが内部パラメータを返さないときの予備。 */
 function assumedFocal(grid: number): number {
   return grid / (2 * Math.tan((55 * Math.PI) / 180 / 2));
@@ -947,7 +1021,8 @@ export async function generate(photo: Blob, options: GenerateOptions): Promise<G
   // ⑥⑦ は写真の解像度に近いグリッドで回す（docs/11 §11.6 S4）。
   // 元写真の長辺がグリッドを超えているときだけ意味がある。
   const nativeLong = prepared.box.scale > 0 ? Math.round(grid / prepared.box.scale) : grid;
-  const fineSize = Math.min(Math.round(grid * FINE_GRID_RATIO), Math.max(grid, nativeLong));
+  const ratio = opts.fineGridRatio ?? FINE_GRID_RATIO;
+  const fineSize = Math.min(Math.round(grid * ratio), Math.max(grid, nativeLong));
   const fine = fineSize > grid ? fineSize : grid;
   const fineFocal = focalPx * (fine / grid);
   const fineRgba =
@@ -1029,8 +1104,12 @@ export async function generate(photo: Blob, options: GenerateOptions): Promise<G
   }
 
   report(1, '完成しました');
+  // 書き出しを実寸へ直す倍率。人物モードだけ、身長の仮定から求める。
+  const metricFix = statureFix(opts.mode, build.metricHeight);
+
   return {
     build,
+    metricFix,
     box: prepared.box,
     planes: { color: rgba, alpha, depth: depth01 },
     stats: {

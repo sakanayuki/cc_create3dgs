@@ -22,6 +22,8 @@ interface PresetSpec {
   inpaint: boolean;
   /** 深度のタイルパス。顔の立体感はほぼこれで決まる（docs/03 §3.4）。 */
   depthTiles: boolean;
+  /** ⑥⑦ を回すグリッドの倍率（docs/03 §3.6.4）。省略すると 1.5。 */
+  fineGridRatio?: number;
 }
 
 // 表示名は index.html のラジオが持つ。ここは挙動だけ。
@@ -29,7 +31,9 @@ const PRESETS: Record<Preset, PresetSpec> = {
   // 軽量はタイルパスもインペイントも行わない（docs/04 §4.7）。速いが顔は平坦になる。
   light: { grid: LIGHT_GRID, reduction: 0.45, inpaint: false, depthTiles: false },
   standard: { grid: WORKING_GRID, reduction: 0.3, inpaint: true, depthTiles: true },
-  high: { grid: WORKING_GRID, reduction: 0, inpaint: true, depthTiles: true },
+  // 高品質は⑥⑦を元写真の解像度で回す（docs/03 §3.6.4）。至近の質感がいちばん
+  // 効くところだが、10 秒の予算をほぼ使い切るので標準には入れない。
+  high: { grid: WORKING_GRID, reduction: 0, inpaint: true, depthTiles: true, fineGridRatio: 2.0 },
 };
 
 const $ = <T extends HTMLElement>(id: string): T => {
@@ -170,6 +174,7 @@ async function run(file: File): Promise<void> {
       reduction: preset.reduction,
       inpaint: preset.inpaint,
       depthTiles: preset.depthTiles,
+      ...(preset.fineGridRatio === undefined ? {} : { fineGridRatio: preset.fineGridRatio }),
       backend,
       // shader-f16 が無い WebGPU では q4f16 のモデルが黙って壊れる。
       // その場合は uint8 側を落とす（modelCatalog の manifestBackendKey）。
@@ -248,7 +253,11 @@ async function download(): Promise<void> {
   button.disabled = true;
   button.textContent = '書き出しています…';
   try {
-    const blob = await toSplatFile(r.build.data, r.build.count, format);
+    // 実寸（カメラを原点にしたメートル）で書き出す（docs/05 §5.3.1）。
+    const blob = await toSplatFile(r.build.data, r.build.count, format, {
+      ...r.build.normalization,
+      metricFix: r.metricFix,
+    });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;

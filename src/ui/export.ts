@@ -27,6 +27,39 @@ function thicknessOf(sx: number, sy: number): number {
   return Math.max(SURFEL_FLATNESS * Math.max(sx, sy), 1e-6);
 }
 
+/**
+ * 書き出す座標系（docs/05 §5.3.1、v2.6.9）。
+ *
+ * ⑥ は被写体を**一辺 1 の立方体**に正規化して出す。描画にはそれで足りるが、
+ * **書き出したファイルまで正規化座標なのは誤り**だった。参照実装（SHARP）の
+ * 出力を測ると、どれもカメラを原点にした**実寸（メートル）**で入っている:
+ *
+ * | | 外接（幅×高さ×奥行き） | z の範囲 |
+ * |---|---|---|
+ * | SHARP test29 | 0.663 × 1.665 × 0.295 | +1.005 〜 +1.300 |
+ * | SHARP test26 | 0.765 × 1.366 × 0.899 | +0.793 〜 +1.692 |
+ * | SHARP test31 | 0.810 × 2.035 × 0.635 | +1.545 〜 +2.180 |
+ * | 私たち（正規化のまま） | 0.385 × **1.000** × 0.216 | −0.108 〜 +0.108 |
+ *
+ * 身長 1.67m の人が高さ 1.0 で出ていた。他の資産と並べる・寸法を測る・
+ * 実寸で出力する、のどれもできない。`Normalization` が逆変換をそのまま
+ * 持っているので、書き出しのときに戻す。
+ *
+ * `metricFix` は、そのうえで掛ける倍率である。深度モデルの絶対値が当てに
+ * ならないぶんを、呼び出し側が推定して渡す（docs/09 §V25）。
+ *
+ * **半径も位置も同じ倍率で動くので、形も見た目も変わらない。** 変わるのは
+ * 「1 単位が何メートルか」だけである。
+ */
+export interface ExportFrame {
+  /** カメラ座標 = 正規化座標 ÷ scale + center。 */
+  readonly center: readonly [number, number, number];
+  /** 正規化の倍率（`SplatBuild.normalization.scale`）。 */
+  readonly scale: number;
+  /** 実寸へ直す追加の倍率。省略すると 1（深度モデルの値をそのまま使う）。 */
+  readonly metricFix?: number;
+}
+
 /** SH 0次の基底関数の値。PLY の f_dc はこれで割った係数として入る。 */
 const SH_C0 = 0.28209479177387814;
 
@@ -45,8 +78,12 @@ interface Unpacked {
   a: number;
 }
 
-/** 24 バイトの1個を読み出す。WGSL の loadSplat と同じ並び。 */
-function unpack(data: Uint8Array, i: number, out: Unpacked): void {
+/**
+ * 24 バイトの1個を読み出す。WGSL の loadSplat と同じ並び。
+ *
+ * `frame` を渡すと、正規化を戻して実寸（カメラを原点にしたメートル）で返す。
+ */
+function unpack(data: Uint8Array, i: number, out: Unpacked, frame?: ExportFrame | null): void {
   const f = new Float32Array(data.buffer, data.byteOffset + i * SPLAT_BYTES, 3);
   const u = new Uint32Array(data.buffer, data.byteOffset + i * SPLAT_BYTES, 6);
   out.x = f[0] as number;
@@ -81,6 +118,16 @@ function unpack(data: Uint8Array, i: number, out: Unpacked): void {
   out.g = g;
   out.b = b;
   out.a = a;
+
+  // 正規化を戻して実寸にする。位置も半径も同じ倍率なので、形は変わらない。
+  if (frame && frame.scale > 0) {
+    const k = (frame.metricFix ?? 1) / frame.scale;
+    out.x = (out.x / frame.scale + (frame.center[0] as number)) * (frame.metricFix ?? 1);
+    out.y = (out.y / frame.scale + (frame.center[1] as number)) * (frame.metricFix ?? 1);
+    out.z = (out.z / frame.scale + (frame.center[2] as number)) * (frame.metricFix ?? 1);
+    out.sx *= k;
+    out.sy *= k;
+  }
 }
 
 /** IEEE 754 半精度 → 単精度。 */
@@ -117,14 +164,18 @@ function logit(a: number): number {
 }
 
 /** `.spz` のバイト列（gzip 前）。 */
-export function splatsToSpzRaw(data: Uint8Array, count: number): Uint8Array {
+export function splatsToSpzRaw(
+  data: Uint8Array,
+  count: number,
+  frame: ExportFrame | null = null,
+): Uint8Array {
   const u: Unpacked = {
     x: 0, y: 0, z: 0, nx: 0, ny: 0, nz: 1, sx: 0, sy: 0, r: 0, g: 0, b: 0, a: 0,
   };
   return encodeSpzRaw(
     { numPoints: count, shDegree: 0, fractionalBits: SPZ_FRACTIONAL_BITS, antialiased: true },
     (i: number, out: SpzPointOut) => {
-      unpack(data, i, u);
+      unpack(data, i, u, frame);
       out.x = u.x;
       out.y = u.y;
       out.z = u.z;
@@ -146,12 +197,16 @@ export function splatsToSpzRaw(data: Uint8Array, count: number): Uint8Array {
 }
 
 /** `.ply`（vanilla 3DGS 互換）のバイト列。 */
-export function splatsToPly(data: Uint8Array, count: number): Uint8Array {
+export function splatsToPly(
+  data: Uint8Array,
+  count: number,
+  frame: ExportFrame | null = null,
+): Uint8Array {
   const u: Unpacked = {
     x: 0, y: 0, z: 0, nx: 0, ny: 0, nz: 1, sx: 0, sy: 0, r: 0, g: 0, b: 0, a: 0,
   };
   return encodePly(count, (i: number, out: PlyGaussianOut) => {
-    unpack(data, i, u);
+    unpack(data, i, u, frame);
     out.x = u.x;
     out.y = u.y;
     out.z = u.z;
@@ -204,7 +259,11 @@ export const SPLAT_STRIDE = 32;
  * 先頭から順に読み込んで表示するので、その順だと形が早く見えてくる。
  * 同じ理由でこちらも並べ替える。描画結果は順序に依らない。
  */
-export function splatsToSplat(data: Uint8Array, count: number): Uint8Array {
+export function splatsToSplat(
+  data: Uint8Array,
+  count: number,
+  frame: ExportFrame | null = null,
+): Uint8Array {
   const u: Unpacked = {
     x: 0, y: 0, z: 0, nx: 0, ny: 0, nz: 1, sx: 0, sy: 0, r: 0, g: 0, b: 0, a: 0,
   };
@@ -213,7 +272,7 @@ export function splatsToSplat(data: Uint8Array, count: number): Uint8Array {
   const order = new Uint32Array(count);
   const key = new Float32Array(count);
   for (let i = 0; i < count; i++) {
-    unpack(data, i, u);
+    unpack(data, i, u, frame);
     order[i] = i;
     key[i] = u.sx * u.sy * thicknessOf(u.sx, u.sy) * (u.a / 255);
   }
@@ -225,7 +284,7 @@ export function splatsToSplat(data: Uint8Array, count: number): Uint8Array {
   const f32 = new Float32Array(out.buffer);
 
   for (let n = 0; n < count; n++) {
-    unpack(data, sorted[n] as number, u);
+    unpack(data, sorted[n] as number, u, frame);
     const o = n * SPLAT_STRIDE;
     const of = o / 4;
     f32[of] = u.x;
@@ -291,14 +350,16 @@ export async function toSplatFile(
   data: Uint8Array,
   count: number,
   format: ExportFormat,
+  /** 実寸へ戻す変換。省略すると正規化座標のまま出す。 */
+  frame: ExportFrame | null = null,
 ): Promise<Blob> {
   const info = EXPORT_FORMATS[format];
   const bytes =
     format === 'spz'
-      ? splatsToSpzRaw(data, count)
+      ? splatsToSpzRaw(data, count, frame)
       : format === 'ply'
-        ? splatsToPly(data, count)
-        : splatsToSplat(data, count);
+        ? splatsToPly(data, count, frame)
+        : splatsToSplat(data, count, frame);
 
   if (!info.gzip) return new Blob([bytes as BlobPart], { type: info.mime });
   if (typeof CompressionStream === 'undefined') {

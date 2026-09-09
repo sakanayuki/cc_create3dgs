@@ -275,3 +275,87 @@ describe('厚みの比が実装をまたいで一致する', () => {
     }
   });
 });
+
+/**
+ * 実寸で書き出す（docs/05 §5.3.1、docs/09 §V25）。
+ *
+ * ⑥ は一辺 1 の立方体に正規化して出す。書き出しではそれを戻し、
+ * さらに身長の仮定から出した倍率を掛けて、カメラを原点にしたメートルにする。
+ */
+describe('実寸で書き出す', () => {
+  const frame = { center: [0.1, -0.2, 2.5] as const, scale: 4, metricFix: 3 };
+  /** 正規化座標 p → 実寸 (p/4 + center) × 3。 */
+  const expected = (p: [number, number, number]): [number, number, number] => [
+    (p[0] / 4 + 0.1) * 3,
+    (p[1] / 4 - 0.2) * 3,
+    (p[2] / 4 + 2.5) * 3,
+  ];
+
+  it('.splat の位置と半径が実寸になる', () => {
+    const p: [number, number, number] = [0.2, -0.4, 0.05];
+    const data = oneSplat(p, [0, 0, -1], [0.01, 0.01], [200, 100, 50, 255]);
+    const out = splatsToSplat(data, 1, frame);
+    const f = new Float32Array(out.buffer, 0, 6);
+    const [ex, ey, ez] = expected(p);
+    expect(f[0]).toBeCloseTo(ex, 5);
+    expect(f[1]).toBeCloseTo(ey, 5);
+    expect(f[2]).toBeCloseTo(ez, 5);
+    // 半径は倍率だけ（中心の移動は掛からない）。
+    // 内部は f16 なので 0.01 は 0.010002 に丸まる。相対で見る。
+    expect((f[3] as number) / ((0.01 * 3) / 4)).toBeCloseTo(1, 3);
+    expect((f[4] as number) / ((0.01 * 3) / 4)).toBeCloseTo(1, 3);
+  });
+
+  it('形は変わらない（2点の距離と半径の比がそのまま）', () => {
+    const a: [number, number, number] = [0.1, 0.1, 0.1];
+    const b: [number, number, number] = [-0.3, 0.2, -0.05];
+    const data = new Uint8Array(SPLAT_BYTES * 2);
+    data.set(oneSplat(a, [0, 0, -1], [0.02, 0.02], [10, 20, 30, 255]), 0);
+    data.set(oneSplat(b, [0, 0, -1], [0.02, 0.02], [10, 20, 30, 255]), SPLAT_BYTES);
+
+    const plain = new Float32Array(splatsToSplat(data, 2).buffer);
+    const metric = new Float32Array(splatsToSplat(data, 2, frame).buffer);
+    const gap = (f: Float32Array): number => {
+      const s = SPLAT_STRIDE / 4;
+      return Math.hypot(
+        (f[0] as number) - (f[s] as number),
+        (f[1] as number) - (f[s + 1] as number),
+        (f[2] as number) - (f[s + 2] as number),
+      );
+    };
+    const ratio = (f: Float32Array): number => gap(f) / (f[3] as number);
+    expect(ratio(metric), '距離 ÷ 半径 が変わっています').toBeCloseTo(ratio(plain), 4);
+    expect(gap(metric) / gap(plain), '倍率が 3/4 になっていません').toBeCloseTo(3 / 4, 5);
+  });
+
+  it('.ply も同じ座標系で出る', () => {
+    const p: [number, number, number] = [0.2, -0.4, 0.05];
+    const data = oneSplat(p, [0, 0, -1], [0.01, 0.01], [200, 100, 50, 255]);
+    const text = new TextDecoder().decode(splatsToPly(data, 1));
+    const body = splatsToPly(data, 1);
+    const headerEnd = text.indexOf('end_header\n') + 'end_header\n'.length;
+    const f = new Float32Array(body.buffer.slice(headerEnd, headerEnd + 12));
+    const plainX = f[0] as number;
+    const m = splatsToPly(data, 1, frame);
+    const mf = new Float32Array(m.buffer.slice(headerEnd, headerEnd + 12));
+    expect(plainX).toBeCloseTo(p[0], 5);
+    expect(mf[0]).toBeCloseTo(expected(p)[0], 5);
+  });
+
+  it('frame を渡さなければ正規化座標のまま', () => {
+    const p: [number, number, number] = [0.2, -0.4, 0.05];
+    const data = oneSplat(p, [0, 0, -1], [0.01, 0.01], [200, 100, 50, 255]);
+    const f = new Float32Array(splatsToSplat(data, 1).buffer, 0, 6);
+    expect(f[0]).toBeCloseTo(p[0], 5);
+    expect((f[3] as number) / 0.01).toBeCloseTo(1, 3);
+  });
+
+  it('metricFix を省くと深度モデルの実寸のまま', () => {
+    const p: [number, number, number] = [0.2, 0, 0];
+    const data = oneSplat(p, [0, 0, -1], [0.01, 0.01], [200, 100, 50, 255]);
+    const f = new Float32Array(splatsToSplat(data, 1, { center: [0, 0, 1], scale: 2 }).buffer, 0, 6);
+    expect(f[0]).toBeCloseTo(0.1, 5);
+    expect(f[2]).toBeCloseTo(1, 5);
+    expect((f[3] as number) / 0.005).toBeCloseTo(1, 3);
+  });
+});
