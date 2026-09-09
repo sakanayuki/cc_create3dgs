@@ -160,6 +160,44 @@ export function boxFromLandmarks(
   return squareAt((xlo + xhi) / 2, (ylo + yhi) / 2, side, width, height);
 }
 
+
+/** 頭のタイルを頭の箱の何倍に広げるか。首と肩を少し含める。 */
+const HEAD_TILE_MARGIN = 1.4;
+
+/**
+ * 頭だけを見る深度タイルの四角を返す（v2.6.4、docs/09 §V18）。
+ *
+ * 体を数枚に割るタイル（`depthTiles`）では、全身写真の顔はタイルの中の
+ * 一部でしかない。実写（1116×2000、長辺を 1024 に落とすので ×0.512）で
+ * 顔は作業グリッドで 140px、495px のタイルを 518² に伸ばしても
+ * **146px 相当**にしかならず、DA3 は鼻も眼窩も出さない。実測では額が
+ * 鼻より 4〜6mm 手前という、前後の逆転した顔になっていた。
+ *
+ * 頭の箱を少し広げたタイルを 1 枚足すと、同じ顔が 518² の中で
+ * **260px 相当**になる。倍率にして 1.8 倍。実測で「顔の中でいちばん手前の
+ * 点」が額（箱の上から 24%）から鼻（同 59%）へ移った。
+ *
+ * 体のタイルと同じくらいの大きさになるなら足さない。同じ絵をもう一度
+ * 推論しても解像度は上がらず、融合の継ぎ目が増えるだけである。
+ *
+ * @param bodyTileSide 体のタイルの一辺。これに対して十分小さいときだけ足す。
+ * @returns タイルの四角。頭が見つからない・意味が無いときは null。
+ */
+export function headDepthTile(
+  alpha: ArrayLike<number>,
+  width: number,
+  height: number,
+  bodyTileSide: number,
+  margin = HEAD_TILE_MARGIN,
+): Rect | null {
+  const head = headBoxFromMatte(alpha, width, height);
+  if (!head) return null;
+  const side = Math.round(head.width * margin);
+  if (side < 64) return null;
+  if (side > bodyTileSide * 0.75) return null;
+  return squareAt(head.x + head.width / 2, head.y + head.height / 2, side, width, height);
+}
+
 /** 中心と辺から、画像に収まる正方形を作る。 */
 function squareAt(cx: number, cy: number, side: number, width: number, height: number): Rect {
   const s = Math.max(8, Math.min(width, height, side));

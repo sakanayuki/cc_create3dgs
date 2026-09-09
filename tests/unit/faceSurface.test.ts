@@ -10,6 +10,7 @@ import {
   boxFromLandmarks,
   faceDepthSurface,
   headBoxFromMatte,
+  headDepthTile,
   type FaceLandmark,
 } from '../../src/pipeline/geometry/faceSurface';
 
@@ -331,6 +332,61 @@ describe('顔の輪郭に沿った隆起（v2.6.1）', () => {
     for (let r = 26; r <= 46; r += 2) {
       const v = prof(r);
       expect(Math.abs(v) / nose, `半径 ${r}px の動き ${(v * 1000).toFixed(2)}mm`).toBeLessThan(0.25);
+    }
+  });
+});
+
+/**
+ * 顔だけを見る深度タイル（docs/09 §V18）。全身写真では顔がタイルの中の
+ * 一部でしかなく、深度モデルが鼻も眼窩も出さない。
+ */
+describe('頭だけを見る深度タイル', () => {
+  it('頭を囲む正方形を、体のタイルより小さく返す', () => {
+    const t = headDepthTile(standingAlpha(), G, G, 120);
+    expect(t).not.toBeNull();
+    const r = t as { x: number; y: number; width: number; height: number };
+    expect(r.width).toBe(r.height);
+    // 頭（幅 40、余裕込みで 48）の 1.4 倍あたり
+    expect(r.width).toBeGreaterThan(60);
+    expect(r.width).toBeLessThan(90);
+    // 頭の中心（128, 50）を含む
+    expect(r.x).toBeLessThan(128);
+    expect(r.x + r.width).toBeGreaterThan(128);
+    expect(r.y).toBeLessThan(50);
+    expect(r.y + r.height).toBeGreaterThan(50);
+  });
+
+  it('体のタイルと大差ないなら足さない', () => {
+    // 体のタイルが 80px なら、頭のタイル（約 67px）は 0.75 倍を超える
+    expect(headDepthTile(standingAlpha(), G, G, 80)).toBeNull();
+  });
+
+  it('小さすぎるタイルは足さない', () => {
+    // 遠くに写った人物。頭は 10px しかない。
+    const a = new Uint8ClampedArray(G * G);
+    const band = (y0: number, y1: number, x0: number, x1: number): void => {
+      for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) a[y * G + x] = 255;
+    };
+    band(4, 14, 123, 133); // 頭
+    band(14, 18, 126, 130); // 首
+    band(18, 60, 113, 143); // 胴
+    expect(headDepthTile(a, G, G, 200)).toBeNull();
+  });
+
+  it('被写体が無ければ null', () => {
+    expect(headDepthTile(new Uint8ClampedArray(G * G), G, G, 200)).toBeNull();
+  });
+
+  it('タイルは画像の外へ出ない', () => {
+    const a = new Uint8ClampedArray(G * G);
+    for (let y = 0; y < 40; y++) for (let x = 0; x < 30; x++) a[y * G + x] = 255;
+    for (let y = 44; y < 200; y++) for (let x = 0; x < 60; x++) a[y * G + x] = 255;
+    const t = headDepthTile(a, G, G, 400);
+    if (t) {
+      expect(t.x).toBeGreaterThanOrEqual(0);
+      expect(t.y).toBeGreaterThanOrEqual(0);
+      expect(t.x + t.width).toBeLessThanOrEqual(G);
+      expect(t.y + t.height).toBeLessThanOrEqual(G);
     }
   });
 });

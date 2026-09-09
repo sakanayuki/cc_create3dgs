@@ -19,6 +19,7 @@ import {
   boxFromLandmarks,
   faceDepthSurface,
   headBoxFromMatte,
+  headDepthTile,
   type FaceLandmark,
 } from './geometry/faceSurface';
 import {
@@ -28,6 +29,7 @@ import {
   subjectBBox,
   WORKING_GRID,
   type Letterbox,
+  gridToSource,
   type Rect,
 } from './0-preprocess';
 import { fuseDepth, type DepthTile } from './2-depth';
@@ -338,6 +340,17 @@ const FACE_MIN_PIXELS = 1024;
 const FACE_MAX_PASSES = 4;
 
 /**
+ * 顔の切り出しを 256² の RGBA で返す。取れなければ null。
+ *
+ * 作業グリッドは長辺 1024 なので、大きい写真では顔が縮んでいる。実写
+ * （1116×2000）では元写真で 273px の顔が、グリッドでは 140px しかない。
+ * landmark モデルは 256² に伸ばして受け取るので、グリッドから切ると
+ * **一度縮めたものを引き伸ばす**ことになる。元写真から切れば本来の
+ * 解像度で渡せる。
+ */
+type FacePatchSource = (box: Rect, size: number) => Promise<Uint8ClampedArray | null>;
+
+/**
  * 顔の 3D landmark を 1 回推論する（478 点、画像座標へ戻して返す）。
  *
  * モデルは 256² の正方入力で、x/y/z を同じ尺度（入力画素）で返す。
@@ -349,10 +362,15 @@ async function inferFaceLandmarks(
   rgba: Uint8ClampedArray,
   grid: number,
   box: Rect,
+  /** 元写真から切り出す手立て。無ければ作業グリッドから切る。 */
+  nativePatch: FacePatchSource | null = null,
 ): Promise<{ points: FaceLandmark[]; score: number }> {
   const size = 256;
-  const patch = cropRgba(rgba, grid, box.x, box.y, box.width, box.height);
-  const small = resizeRgba(patch, box.width, box.height, size, size);
+  let small: Uint8ClampedArray | null = nativePatch ? await nativePatch(box, size) : null;
+  if (!small) {
+    const patch = cropRgba(rgba, grid, box.x, box.y, box.width, box.height);
+    small = resizeRgba(patch, box.width, box.height, size, size);
+  }
 
   // このモデルは NHWC で 0..1 の RGB を取る（正規化はしない）。
   const input = new Float32Array(size * size * 3);
@@ -382,6 +400,45 @@ async function inferFaceLandmarks(
 }
 
 /**
+ * 元写真から顔を切り出す手立てを作る（v2.6.4、docs/09 §V18）。
+ *
+ * 縮小して載せた写真でだけ意味がある。拡大して載せた写真（§3.2.2）では
+ * グリッドのほうが細かいので null を返し、呼び出し側はグリッドから切る。
+ *
+ * EXIF の回転を自分で解かないよう、**画像全体を `from-image` で一度
+ * 復号してから切る**。`createImageBitmap` の切り出し矩形と回転を同時に
+ * 使うと、どちらが先に効くかがブラウザ間で揃わない。
+ *
+ * 失敗しても生成は止めない。null を返せばグリッド経由に落ちる。
+ */
+function nativeFacePatchSource(photo: Blob, lb: Letterbox): FacePatchSource | null {
+  if (lb.scale >= 1) return null;
+  if (typeof createImageBitmap !== 'function' || typeof OffscreenCanvas === 'undefined') return null;
+
+  let bitmap: ImageBitmap | null = null;
+  let failed = false;
+  return async (box: Rect, size: number): Promise<Uint8ClampedArray | null> => {
+    if (failed) return null;
+    try {
+      if (!bitmap) bitmap = await createImageBitmap(photo, { imageOrientation: 'from-image' });
+      const [sx, sy] = gridToSource(lb, box.x, box.y);
+      const side = box.width / lb.scale;
+      // 元写真より粗くなるなら、わざわざ切り直す意味が無い。
+      if (side <= size) return null;
+      const canvas = new OffscreenCanvas(size, size);
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      if (!ctx) return null;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(bitmap, sx, sy, side, side, 0, 0, size, size);
+      return ctx.getImageData(0, 0, size, size).data;
+    } catch {
+      failed = true;
+      return null;
+    }
+  };
+}
+
+/**
  * 顔の起伏を深度へ入れる（docs/03 §3.4.5、v2.6）。
  *
  * 一般の深度モデルは顔をほぼ平らな楕円として返す。DA3 は Small でも
@@ -403,6 +460,7 @@ async function applyFaceDepth(
   focalPx: number,
   backend: Backend,
   shaderF16: boolean,
+  nativePatch: FacePatchSource | null = null,
 ): Promise<{ depth: Float32Array; applied: boolean }> {
   const seed = headBoxFromMatte(alpha, grid, grid);
   if (!seed) return { depth, applied: false };
@@ -426,7 +484,7 @@ async function applyFaceDepth(
     let box = seed;
     let best: { points: FaceLandmark[]; score: number; box: Rect } | null = null;
     for (let i = 0; i < FACE_MAX_PASSES; i++) {
-      const r = await inferFaceLandmarks(session, rgba, grid, box);
+      const r = await inferFaceLandmarks(session, rgba, grid, box, nativePatch);
       if (!best || r.score > best.score) best = { ...r, box };
       const next = boxFromLandmarks(r.points, grid, grid);
       if (!next) break;
@@ -596,6 +654,10 @@ async function runDepthTiles(
   if (!bbox) return { depth: global, tiles: 0 };
 
   const rects = depthTiles(bbox, grid, grid);
+  // 顔だけを詳しく見るタイルを 1 枚足す（docs/09 §V18）。
+  const bodyTileSide = rects.length > 0 ? (rects[0] as Rect).width : Math.min(grid, grid);
+  const head = headDepthTile(alpha, grid, grid, bodyTileSide);
+  if (head) rects.push(head);
   const tiles: DepthTile[] = [];
   for (const rect of rects) {
     if (rect.width < 32 || rect.height < 32) continue;
@@ -754,7 +816,16 @@ export async function generate(photo: Blob, options: GenerateOptions): Promise<G
   if (opts.mode === 'person' && depthOut.kind === 'depth') {
     report(0.58, '顔の立体を起こしています');
     const withFace = await mark('顔の起伏', () =>
-      applyFaceDepth(depthRaw, rgba, alpha, grid, focalPx, opts.backend, shaderF16),
+      applyFaceDepth(
+        depthRaw,
+        rgba,
+        alpha,
+        grid,
+        focalPx,
+        opts.backend,
+        shaderF16,
+        nativeFacePatchSource(photo, prepared.box),
+      ),
     );
     depthRaw = withFace.depth;
     faceApplied = withFace.applied;
