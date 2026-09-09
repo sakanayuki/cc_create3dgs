@@ -33,6 +33,7 @@ import {
   type Rect,
 } from './0-preprocess';
 import { fuseDepth, type DepthTile } from './2-depth';
+import { applyLimbRoundness, DEFAULT_LIMB_PARAMS } from './geometry/limbRoundness';
 import {
   buildInpaintMask,
   compositeInpaint,
@@ -867,13 +868,29 @@ export async function generate(photo: Blob, options: GenerateOptions): Promise<G
     pullBoundaryDepthInward(calibrated.depth, alpha, grid, grid, boundaryBand),
   );
 
+  // 法線は実距離で推定する。正規化した値のままだと焦点距離と単位が合わない。
+  const span = calibrated.farZ - calibrated.nearZ;
+  const plain = new Float32Array(grid * grid);
+  for (let i = 0; i < plain.length; i++) {
+    plain[i] = calibrated.nearZ + ((pulled[i] as number) / 65535) * span;
+  }
+  let metric: Float32Array = plain;
+
+  // 四肢に円柱の断面を与える（docs/09 §V20）。深度モデルは腕や脚の横断面を
+  // ほとんど平らに返すので、シルエットの横一線の区間から円柱を起こして
+  // 大域だけ差し替える。頭は円柱ではないので外す。
+  if (opts.mode === 'person') {
+    const headBox = headBoxFromMatte(alpha, grid, grid);
+    metric = await mark('四肢の丸み', () =>
+      applyLimbRoundness(metric, alpha, grid, grid, focalPx, DEFAULT_LIMB_PARAMS, headBox),
+    );
+  }
+
   // 0..1 に直した深度。以降の工程はこの形で受け取る。
   const depth01 = new Float32Array(grid * grid);
-  for (let i = 0; i < depth01.length; i++) depth01[i] = (pulled[i] as number) / 65535;
-  // 法線は実距離で推定する。正規化した値のままだと焦点距離と単位が合わない。
-  const metric = new Float32Array(grid * grid);
-  const span = calibrated.farZ - calibrated.nearZ;
-  for (let i = 0; i < metric.length; i++) metric[i] = calibrated.nearZ + (depth01[i] as number) * span;
+  for (let i = 0; i < depth01.length; i++) {
+    depth01[i] = Math.max(0, Math.min(1, ((metric[i] as number) - calibrated.nearZ) / span));
+  }
 
   report(0.72, '面の向きを求めています');
   const normals = await mark('法線推定', () =>
