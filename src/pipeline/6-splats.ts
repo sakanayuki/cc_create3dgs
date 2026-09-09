@@ -43,7 +43,11 @@ export interface BuildInput {
 export interface BuildParams {
   /**
    * サーフェルの広がり。1画素ぶんの footprint に対する半径の倍率。
-   * docs/03 §3.6.1 は 1.4。小さいと隙間が空き、大きいとぼける。
+   *
+   * **1.3（v2.6.7）。** docs/03 §3.6.1 は 1.4 だった。小さいと隙間が空き、
+   * 大きいとぼける。参照実装（SHARP）の「半径 ÷ 点間隔」は 0.70 で、私たちは
+   * 1.4 で 0.80、1.3 で 0.75 になる。1.2（0.69）まで落とすと、胴を 0.12 単位に
+   * 切った至近で穴が 0.11% → 0.46% に増えたので、1.3 で止める。docs/11 §11.6 S5。
    */
   readonly spread: number;
   /** 傾斜面での引き伸ばしの上限。`1/max(|n·v|, cosLimit)`。 */
@@ -107,7 +111,7 @@ export interface BuildParams {
 }
 
 export const DEFAULT_BUILD_PARAMS: BuildParams = {
-  spread: 1.4,
+  spread: 1.3,
   cosLimit: 0.3,
   backShell: false,
   backStride: 2,

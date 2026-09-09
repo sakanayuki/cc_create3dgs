@@ -26,6 +26,7 @@ import {
   depthTiles,
   expandToSquare,
   prepareImage,
+  prepareImageScaled,
   subjectBBox,
   WORKING_GRID,
   type Letterbox,
@@ -776,6 +777,27 @@ async function runInpaint(
   }
 }
 
+/**
+ * ⑥⑦（サンプリングとスプラット生成）を回すグリッドの一辺（docs/11 §11.6 S4）。
+ *
+ * **深度は 1024² のままでよい。** 深度モデルの入力が 518² なので、上げても
+ * 情報は増えない。増えるのは**色**である。1116×2000 の写真を 1024² に載せると
+ * 中身は 571×1024 で、線密度で 1.95 倍を捨てている。docs/03 §3.2 は
+ * 「色プレーンは写真そのものであり、ここが品質の天井になる」と書いているのに、
+ * その天井を自分で下げていた。
+ *
+ * **全段を上げない理由。** 実測で CPU が 2.7 倍（5.5s → 14.7s）になり、10 秒の
+ * 予算（D4・D13）に入らない。⑥⑦ だけなら +1.3 秒で済む。
+ *
+ * **1.5 倍で止める理由。** 写真の実寸（この例では 2000）まで上げると質感はもう
+ * 少し上がるが（至近の勾配 4.6 → 5.7）、枚数が 536k → 894k、`.splat` が
+ * 17MB → 29MB、CPU が +4.3 秒になり、どちらの予算にも入らない。
+ *
+ * 作業グリッドへの**比**で持つ。軽量プリセット（512²）でも同じ割合で効き、
+ * 「軽くしたのに⑥⑦だけ 3 倍重い」ということが起きない。
+ */
+const FINE_GRID_RATIO = 1.5;
+
 /** 画角 55° を仮定したときの焦点距離。モデルが内部パラメータを返さないときの予備。 */
 function assumedFocal(grid: number): number {
   return grid / (2 * Math.tan((55 * Math.PI) / 180 / 2));
@@ -909,23 +931,43 @@ export async function generate(photo: Blob, options: GenerateOptions): Promise<G
     );
   }
 
-  // 0..1 に直した深度。以降の工程はこの形で受け取る。
+  // 0..1 に直した深度。⑧ のマスクと UI のプレーンはこの形で受け取る。
   const depth01 = new Float32Array(grid * grid);
   for (let i = 0; i < depth01.length; i++) {
     depth01[i] = Math.max(0, Math.min(1, ((metric[i] as number) - calibrated.nearZ) / span));
   }
 
+  // ⑥⑦ は写真の解像度に近いグリッドで回す（docs/11 §11.6 S4）。
+  // 元写真の長辺がグリッドを超えているときだけ意味がある。
+  const nativeLong = prepared.box.scale > 0 ? Math.round(grid / prepared.box.scale) : grid;
+  const fineSize = Math.min(Math.round(grid * FINE_GRID_RATIO), Math.max(grid, nativeLong));
+  const fine = fineSize > grid ? fineSize : grid;
+  const fineFocal = focalPx * (fine / grid);
+  const fineRgba =
+    fine > grid
+      ? await mark('色の再サンプル', () => prepareImageScaled(photo, prepared.box, fine))
+      : rgba;
+  const fineAlpha =
+    fine > grid
+      ? Uint8ClampedArray.from(resizePlane(alpha, grid, grid, fine, fine))
+      : alpha;
+  const fineMetric = fine > grid ? resizePlane(metric, grid, grid, fine, fine) : metric;
+  const fineDepth01 = new Float32Array(fine * fine);
+  for (let i = 0; i < fineDepth01.length; i++) {
+    fineDepth01[i] = Math.max(0, Math.min(1, ((fineMetric[i] as number) - calibrated.nearZ) / span));
+  }
+
   report(0.72, '面の向きを求めています');
   const normals = await mark('法線推定', () =>
-    estimateNormals(metric, grid, grid, focalPx, span * 0.05),
+    estimateNormals(fineMetric, fine, fine, fineFocal, span * 0.05),
   );
 
   report(0.82, 'ガウシアンを配置しています');
   const samplingParams = await mark('サンプリング閾値', () =>
-    solveSamplingParams(depth01, rgba, alpha, grid, grid, opts.reduction),
+    solveSamplingParams(fineDepth01, fineRgba, fineAlpha, fine, fine, opts.reduction),
   );
   const cells = await mark('適応サンプリング', () =>
-    adaptiveSample(depth01, rgba, alpha, grid, grid, samplingParams),
+    adaptiveSample(fineDepth01, fineRgba, fineAlpha, fine, fine, samplingParams),
   );
 
   report(0.9, '厚みをつけています');
@@ -933,15 +975,18 @@ export async function generate(photo: Blob, options: GenerateOptions): Promise<G
   // 厚みマップは背面シェルにしか使わない。作らないなら計算もしない。
   const thickness = buildParams.backShell
     ? await mark('厚みマップ', () =>
-        thicknessMap(alpha, grid, grid, { maxThickness: BACK_SHELL_THICKNESS, profile: 'ellipsoid' }),
+        thicknessMap(fineAlpha, fine, fine, {
+          maxThickness: BACK_SHELL_THICKNESS,
+          profile: 'ellipsoid',
+        }),
       )
     : null;
   const camera = {
     cells,
     normals,
-    width: grid,
-    height: grid,
-    focalPx,
+    width: fine,
+    height: fine,
+    focalPx: fineFocal,
     nearZ: calibrated.nearZ,
     farZ: calibrated.farZ,
   };
@@ -949,7 +994,7 @@ export async function generate(photo: Blob, options: GenerateOptions): Promise<G
   // まずインペイント無しで1枚作って見せる（docs/03 §3.1 のプレビュー）。
   // 待たせるより、粗くても先に立体を出すほうが体感が速い。
   const preview = await mark('スプラット組み立て', () =>
-    buildSplats(camera, rgba, alpha, thickness, null, buildParams),
+    buildSplats(camera, fineRgba, fineAlpha, thickness, null, buildParams),
   );
   opts.onPreview?.(preview);
 
@@ -966,9 +1011,12 @@ export async function generate(photo: Blob, options: GenerateOptions): Promise<G
         runInpaint(rgba, masked, grid, opts.backend, shaderF16),
       );
       inpaintUsed = painted.used;
-      // スカートの色だけが変わるので、組み立て直す。
+      // スカートの色だけが変わるので、組み立て直す。⑧ は作業グリッドで回すので、
+      // ⑥ のグリッドに合わせて引き伸ばす。
+      const plane =
+        fine > grid ? resizeRgba(painted.plane, grid, grid, fine, fine) : painted.plane;
       build = await mark('スカート色の差し替え', () =>
-        buildSplats(camera, rgba, alpha, thickness, null, buildParams, painted.plane),
+        buildSplats(camera, fineRgba, fineAlpha, thickness, null, buildParams, plane),
       );
     }
   }

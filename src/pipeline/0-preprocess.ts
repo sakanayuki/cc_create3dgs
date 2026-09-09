@@ -135,6 +135,43 @@ export async function prepareImage(source: Blob, size = WORKING_GRID): Promise<P
   }
 }
 
+/**
+ * 既にあるレターボックスを `size` の正方グリッドへそのまま拡大して、写真を
+ * もう一度載せる（docs/03 §3.8、docs/11 §11.6 S4）。
+ *
+ * `letterbox(w, h, size)` を取り直すと、丸めのぶんだけ位置が 0.5 画素ずれる。
+ * ⑥⑦ を高解像度で回すときは、深度とマットを `size / box.size` 倍に引き伸ばして
+ * 重ねるので、**色も同じ倍率で置かないと縁に色ずれが出る**。ここでは倍率を
+ * 掛けるだけにして、ずれが原理的に出ないようにする。
+ */
+export async function prepareImageScaled(
+  source: Blob,
+  box: Letterbox,
+  size: number,
+): Promise<Uint8ClampedArray> {
+  const k = size / box.size;
+  const bitmap = await createImageBitmap(source, { imageOrientation: 'from-image' });
+  try {
+    const canvas = new OffscreenCanvas(size, size);
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) throw new Error('2D コンテキストを取得できませんでした');
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(bitmap, box.offsetX * k, box.offsetY * k, box.width * k, box.height * k);
+    const rgba = ctx.getImageData(0, 0, size, size).data;
+    replicateEdgesIntoPadding(rgba, size, {
+      ...box,
+      size,
+      offsetX: Math.round(box.offsetX * k),
+      offsetY: Math.round(box.offsetY * k),
+      width: Math.round(box.width * k),
+      height: Math.round(box.height * k),
+    });
+    return rgba;
+  } finally {
+    bitmap.close();
+  }
+}
+
 // --- 深度パスの入力 ---------------------------------------------------------
 
 export interface Rect {
