@@ -77,6 +77,16 @@ input[type=file]{font:inherit;font-size:13.5px}
     <div class="stat"><span class="k">生成</span><span class="v">7.2 s</span></div>
   </div>
 
+  <style>
+    .multi-slots { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0; }
+    .multi-slots .slot {
+      flex: 1 1 180px; display: flex; flex-direction: column; gap: 4px;
+      padding: 10px; border: 1px solid var(--line, #d8d4cc); border-radius: 8px;
+    }
+    .multi-slots .slot-name { font-weight: 600; }
+    .multi-slots .slot-hint { font-size: 12px; opacity: .75; }
+    .multi-slots input[type=file] { font-size: 12px; }
+  </style>
   <section id="pick">
     <h2>写真を選ぶ</h2>
     <div class="card">
@@ -89,12 +99,45 @@ input[type=file]{font:inherit;font-size:13.5px}
         <label class="opt"><input type="radio" name="preset" value="light">軽量（速いが顔は平坦）</label>
         <label class="opt"><input type="radio" name="preset" value="standard" checked>標準</label>
         <label class="opt"><input type="radio" name="preset" value="high">高品質</label>
+        <label class="opt"><input type="radio" name="preset" value="multi">高品質・複数枚（3方向）</label>
       </div>
       <p class="note" style="margin-bottom:14px">
         初回はモデルのダウンロードに 100 MB 以上かかります。Wi-Fi をおすすめします。
         一度落としたものは端末内にキャッシュされます。
       </p>
+
+      <!-- 1枚モード -->
       <input id="photo" type="file" accept="image/*">
+
+      <!-- 複数枚モード（docs/12 D24: どの枠に何を入れるかは利用者が指定する） -->
+      <div id="multi-pick" hidden>
+        <p class="note" style="margin-top:0">
+          <strong>同じ姿勢のまま、その場で向きだけ変えて撮った3枚</strong>を入れてください。
+          向きは「写真の中で被写体がどちらを向いているか」で選びます。
+          正面だけでも 2 枚（正面＋どちらかの横）でも動きます。
+        </p>
+        <div class="multi-slots">
+          <label class="slot">
+            <span class="slot-name">正面</span>
+            <span class="slot-hint">こちらを向いている</span>
+            <input id="photo-front" type="file" accept="image/*">
+          </label>
+          <label class="slot">
+            <span class="slot-name">右向き</span>
+            <span class="slot-hint">画面の<strong>右</strong>を向いている</span>
+            <input id="photo-right" type="file" accept="image/*">
+          </label>
+          <label class="slot">
+            <span class="slot-name">左向き</span>
+            <span class="slot-hint">画面の<strong>左</strong>を向いている</span>
+            <input id="photo-left" type="file" accept="image/*">
+          </label>
+        </div>
+        <p class="note">
+          枠を取り違えても、顔の向きから気づいて直します。直したときはそう表示します。
+        </p>
+        <button id="multi-go" class="btn" type="button" disabled>3枚から作る</button>
+      </div>
     </div>
     <div class="card warn" id="unsupported" hidden>
       <h3>この端末では生成できません</h3>

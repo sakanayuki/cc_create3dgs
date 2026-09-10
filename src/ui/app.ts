@@ -6,6 +6,8 @@
  * 状態を増やすほど、途中で失敗したときの戻り先が分からなくなる。
  */
 import { generate, type GenerateResult, type SubjectMode } from '../pipeline/generate';
+import { generateMulti, type GenerateMultiResult, type MultiPhoto } from '../pipeline/generateMulti';
+import type { ViewSlot } from '../pipeline/align/rigid';
 import { LIGHT_GRID, WORKING_GRID } from '../pipeline/0-preprocess';
 import { detectCapability, type Capability } from '../runtime/capability';
 import { configureOrt, ortDevice, type Backend } from '../runtime/OrtSession';
@@ -13,7 +15,7 @@ import { isolationSummary } from '../runtime/crossOriginIsolation';
 import { EXPORT_FORMATS, toSplatFile, type ExportFormat } from './export';
 import { Viewer } from './viewer';
 
-export type Preset = 'light' | 'standard' | 'high';
+export type Preset = 'light' | 'standard' | 'high' | 'multi';
 
 /** docs/04 §4.7 の品質プリセット。 */
 interface PresetSpec {
@@ -34,6 +36,10 @@ const PRESETS: Record<Preset, PresetSpec> = {
   // 高品質は⑥⑦を元写真の解像度で回す（docs/03 §3.6.4）。至近の質感がいちばん
   // 効くところだが、10 秒の予算をほぼ使い切るので標準には入れない。
   high: { grid: WORKING_GRID, reduction: 0, inpaint: true, depthTiles: true, fineGridRatio: 2.0 },
+  // 複数枚モード（docs/12）。1枚あたりは高品質と同じだが、**枚数ぶん時間がかかる**。
+  // ⑥⑦ を元写真の解像度で回すと 3 枚で点が 280 万に達して描画が持たないので、
+  // そこだけ標準に戻す。重複除去（docs/12 §12.8）が入るまでの暫定である。
+  multi: { grid: WORKING_GRID, reduction: 0.3, inpaint: true, depthTiles: true },
 };
 
 const $ = <T extends HTMLElement>(id: string): T => {
@@ -49,6 +55,8 @@ interface State {
   capability?: Capability;
   viewer?: Viewer;
   result?: GenerateResult;
+  /** 複数枚モードの結果。書き出しは基準 view のものを使う。 */
+  multi?: GenerateMultiResult;
   busy: boolean;
 }
 
@@ -159,6 +167,8 @@ async function run(file: File): Promise<void> {
     show('work');
     setProgress(0, '準備しています');
     $('workError').hidden = true;
+    // 1枚モードの結果が、前回の複数枚の合成結果で書き出されないようにする。
+    delete state.multi;
 
     const cap = state.capability ?? (await detectCapability());
     const preset = PRESETS[currentPreset()];
@@ -231,6 +241,134 @@ async function run(file: File): Promise<void> {
   }
 }
 
+/** 選んだプリセットに合わせて、1枚の入力と3枠の入力を出し分ける。 */
+function syncPickUi(): void {
+  const multi = currentPreset() === 'multi';
+  $('photo').hidden = multi;
+  $('multi-pick').hidden = !multi;
+  syncMultiButton();
+}
+
+const MULTI_SLOTS: readonly { slot: ViewSlot; id: string }[] = [
+  { slot: 'front', id: 'photo-front' },
+  { slot: 'right', id: 'photo-right' },
+  { slot: 'left', id: 'photo-left' },
+];
+
+function pickedPhotos(): MultiPhoto[] {
+  const out: MultiPhoto[] = [];
+  for (const { slot, id } of MULTI_SLOTS) {
+    const f = $<HTMLInputElement>(id).files?.[0];
+    if (f) out.push({ slot, blob: f });
+  }
+  return out;
+}
+
+/** 正面を含めて2枚以上そろって初めて押せる（docs/12 §12.7「2枚のとき」）。 */
+function syncMultiButton(): void {
+  const picked = pickedPhotos();
+  const hasFront = picked.some((p) => p.slot === 'front');
+  const btn = $<HTMLButtonElement>('multi-go');
+  btn.disabled = picked.length < 2;
+  btn.textContent =
+    picked.length < 2
+      ? '2枚以上を選んでください'
+      : hasFront
+        ? `${picked.length}枚から作る`
+        : `${picked.length}枚から作る（正面があると精度が上がります）`;
+}
+
+async function runMulti(): Promise<void> {
+  if (state.busy) return;
+  const photos = pickedPhotos();
+  if (photos.length < 2) return;
+  state.busy = true;
+
+  try {
+    show('work');
+    setProgress(0, '準備しています');
+    $('workError').hidden = true;
+
+    const cap = state.capability ?? (await detectCapability());
+    const preset = PRESETS[currentPreset()];
+    const viewer = await ensureViewer();
+
+    const result = await withInferenceFallback(inferenceBackend(cap), (backend) =>
+      generateMulti(photos, {
+        mode: currentMode(),
+        grid: preset.grid,
+        reduction: preset.reduction,
+        inpaint: preset.inpaint,
+        depthTiles: preset.depthTiles,
+        backend,
+        shaderF16: cap.shaderF16,
+        onProgress: setProgress,
+        // 1枚目ができた時点で見せる。3枚ぶん待たせない。
+        onPreview: (b) => {
+          show('view');
+          $('refining').hidden = false;
+          $('stats').innerHTML = '';
+          viewer.resize();
+          viewer.setSplats(b.data, b.count);
+        },
+      }),
+    );
+    state.multi = result;
+    // 書き出しは基準 view の結果を土台にする（実寸倍率などがそこに乗っている）。
+    const ref = result.views[result.registration.referenceIndex]?.result;
+    if (ref) state.result = ref;
+
+    show('view');
+    $('refining').hidden = true;
+    viewer.resize();
+    viewer.setSplats(result.build.data, result.build.count);
+    $('stats').innerHTML = multiStatsHtml(result);
+  } catch (e) {
+    show('work');
+    $('workError').hidden = false;
+    $('workError').innerHTML =
+      `<strong>生成できませんでした。</strong><br><span class="mono">${esc(String(e))}</span>`;
+  } finally {
+    state.busy = false;
+  }
+}
+
+const SLOT_LABEL: Record<ViewSlot, string> = { front: '正面', right: '右向き', left: '左向き' };
+
+function multiStatsHtml(r: GenerateMultiResult): string {
+  const deg = (rad: number): string => `${((rad * 180) / Math.PI).toFixed(1)}°`;
+  const totalMs = r.views.reduce(
+    (a, v) => a + Object.values(v.result.stats.timings).reduce((x, y) => x + y, 0),
+    0,
+  );
+  const flipped = r.registration.views.filter((v) => v.slotFlipped).map((v) => SLOT_LABEL[v.slot]);
+  const rows = r.registration.views
+    .map(
+      (v, i) =>
+        `${SLOT_LABEL[v.slot].padEnd(4, '　')} 向き ${deg(v.pose.yaw).padStart(7)} / 尺度 ${v.pose.scale.toFixed(3)} / 収まり ${(v.insideRatio * 100).toFixed(1)}%${
+          i === r.registration.referenceIndex ? '（基準）' : ''
+        }`,
+    )
+    .join('\n');
+
+  return `<div class="grid">
+       <div class="stat"><span class="k">ガウシアン</span><span class="v">${r.build.count.toLocaleString('ja-JP')}</span></div>
+       <div class="stat"><span class="k">使った写真</span><span class="v">${r.views.length} 枚</span></div>
+       <div class="stat"><span class="k">合わせの残差（最小）</span><span class="v">${(r.registration.worstInsideRatio * 100).toFixed(1)}%</span></div>
+       <div class="stat"><span class="k">生成時間</span><span class="v">${(totalMs / 1000).toFixed(1)} s</span></div>
+     </div>
+     ${
+       flipped.length > 0
+         ? `<p class="note"><strong>枠を読み替えました: ${esc(flipped.join('、'))}。</strong>入れた写真の向きが枠と逆だったので、顔の向きから判断して直しました。</p>`
+         : ''
+     }
+     <p class="note">
+       <strong>重複除去と色合わせはまだ入っていません（docs/12 §12.8, §12.9）。</strong>
+       両方の写真から見えている面は二重に置かれ、写真ごとの露出差は継ぎ目の色差として出ます。
+     </p>
+     <details><summary>view ごとの位置合わせ</summary><pre class="mono">${esc(rows)}</pre></details>`;
+}
+
 function currentFormat(): ExportFormat {
   const el = document.querySelector<HTMLInputElement>('input[name="format"]:checked');
   return (el?.value as ExportFormat) ?? 'spz';
@@ -246,6 +384,10 @@ function showFormatNote(): void {
 async function download(): Promise<void> {
   const r = state.result;
   if (!r) return;
+  // 複数枚モードでは、合成した立体のほうを書き出す。基準 view のものを
+  // 出すと、画面に見えているものとファイルの中身が食い違う。
+  const build = state.multi?.build ?? r.build;
+  const metricFix = state.multi?.metricFix ?? r.metricFix;
   const format = currentFormat();
   const info = EXPORT_FORMATS[format];
   const button = $<HTMLButtonElement>('save');
@@ -254,9 +396,9 @@ async function download(): Promise<void> {
   button.textContent = '書き出しています…';
   try {
     // 実寸（カメラを原点にしたメートル）で書き出す（docs/05 §5.3.1）。
-    const blob = await toSplatFile(r.build.data, r.build.count, format, {
-      ...r.build.normalization,
-      metricFix: r.metricFix,
+    const blob = await toSplatFile(build.data, build.count, format, {
+      ...build.normalization,
+      metricFix,
     });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -276,8 +418,18 @@ export function mountApp(): void {
     const file = (e.target as HTMLInputElement).files?.[0];
     if (file) void run(file);
   });
+  for (const el of document.querySelectorAll('input[name="preset"]')) {
+    el.addEventListener('change', syncPickUi);
+  }
+  for (const { id } of MULTI_SLOTS) {
+    $(id).addEventListener('change', syncMultiButton);
+  }
+  $('multi-go').addEventListener('click', () => void runMulti());
+  syncPickUi();
   $('again').addEventListener('click', () => {
     ($('photo') as HTMLInputElement).value = '';
+    for (const { id } of MULTI_SLOTS) ($(id) as HTMLInputElement).value = '';
+    syncMultiButton();
     $('refining').hidden = true;
     show('pick');
   });
