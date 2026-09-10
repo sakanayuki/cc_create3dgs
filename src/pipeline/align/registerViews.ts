@@ -33,6 +33,13 @@
  *
  * 枠（docs/12 D24）で yaw の初期値が分かっているので、その周りを粗く走査してから
  * パターン探索で詰める。微分は使わない。決定的に動くので、同じ入力なら同じ結果が出る。
+ *
+ * ## 枠の入れ違い（R20）
+ *
+ * 利用者は「右向き」の枠に左向きの写真を入れる。設計した本人が最初の実測でやって、
+ * 遠回りした（docs/12 §12.15.5）。**顔ランドマークの符号**でそれを見つけ、
+ * 逆向きから探し直して、直したことを `slotFlipped` で伝える。
+ * 黙って読み替えると、次に同じ間違いをしたときに気づけない。
  */
 import {
   buildSilhouette,
@@ -74,6 +81,15 @@ export interface AlignView {
    * 省略すると解が腕に引きずられる。
    */
   readonly usable?: ArrayLike<number>;
+  /**
+   * 顔ランドマークから測った頭のヨー[度]（省略可）。
+   *
+   * 実測では**大きさが真値の半分ほどしか出ない**（±90° の写真で 39〜49°）。
+   * モデル自身の確からしさも負で、横向きは学習の外だと言っている（R14）。
+   * だから角度そのものには使わない。**符号だけを使う。**
+   * 枠の入れ違い（R20）の裏取りに効く（docs/12 §12.15.5）。
+   */
+  readonly headYawDeg?: number;
 }
 
 export interface RegisterOptions {
@@ -107,6 +123,16 @@ export interface ViewResult {
    * 当初 M1 をこれで定義したが、構造的に届かない閾値になっていた（docs/12 §12.15.3）。
    */
   readonly iou: number;
+  /**
+   * **枠と逆向きの解に落ち着いた**（docs/12 R20）。
+   *
+   * 利用者が「右向き」の枠に左向きの写真を入れた、という意味である。
+   * 位置合わせは自分で直すが、直したことは伝える。黙って読み替えると、
+   * 次に同じ間違いをしたときに気づけない。
+   */
+  readonly slotFlipped: boolean;
+  /** 顔から測ったヨーの符号が、枠と食い違っていた（`headYawDeg` を渡したときだけ）。 */
+  readonly headYawDisagrees: boolean;
 }
 
 export interface RegisterResult {
@@ -118,6 +144,8 @@ export interface RegisterResult {
   readonly cost: number;
   /** M1 の最小値。合格ラインは 0.95（docs/12 §12.13）。 */
   readonly worstInsideRatio: number;
+  /** 枠を読み替えた view があるか。UI はこれを見て利用者に伝える。 */
+  readonly anySlotFlipped: boolean;
 }
 
 /**
@@ -148,7 +176,7 @@ export function costAtPoses(
   );
   const mats = poses.map((pp) => rotationMatrix(pp));
   const scratch = makeScratch(Math.max(...grids.map((g) => g.width * g.height)));
-  return evaluate(points, grids, cams, poses, mats, frames, scratch);
+  return evaluate(points, grids, cams, poses, mats, frames, refIndex, scratch);
 }
 
 /** `usable` と α の論理積を、α と同じ 0〜255 の形で返す。 */
@@ -325,6 +353,7 @@ function evaluate(
   poses: readonly ViewPose[],
   mats: readonly Mat3[],
   frames: readonly PoseFrame[],
+  referenceIndex: number,
   scratch: Scratch,
 ): CostParts {
   const nViews = points.length;
@@ -348,6 +377,17 @@ function evaluate(
     let projTop = Infinity;
     let projBottom = -Infinity;
 
+    // **既知の縮退（近づけてはいけない場所）。**
+    //
+    // 基準以外の2枚を**同じ姿勢に重ねる**と、互いのマスクに完全に収まるので
+    // 目的関数が安くなる。合成データで測ると、正しい配置 0.0125 に対して
+    // 2枚を重ねた配置は 0.0064 だった。**目的関数の谷としては、そちらのほうが深い。**
+    //
+    // 基準との組だけを見る「星形」にすればこの穴は構造ごと消えるが、
+    // 横向き同士の拘束が無くなるぶん角度の精度が落ちた（合成で 90° → 78.6°）。
+    // いまは全部の組を見て、**枠（利用者の指定）を離れないことで穴を避けている**。
+    // 探索の刻みは最大 4° で縮んでいくので、160° 跳んでここへ落ちることはない。
+    // 枠を無視した広い探索を入れるときは、この穴を先に塞ぐこと。
     for (let i = 0; i < nViews; i++) {
       if (i === j) continue; // 自分の点は必ず自分を覆うので、覆いの判定に入れない
       const pi = points[i] as ViewPoints;
@@ -509,6 +549,19 @@ function withParam(pose: ViewPose, key: ParamKey, value: number): ViewPose {
   return { ...pose, [key]: value };
 }
 
+/**
+ * 解いた yaw が、枠から決まる向きと逆かどうか。
+ *
+ * 正面の枠（期待 0）は向きを持たないので、常に false を返す。
+ * 小さい角度で符号がふらつくのは入れ違いではないので、15° の不感帯を置く。
+ */
+function isFlipped(expected: number, got: number): boolean {
+  const dead = (15 * Math.PI) / 180;
+  if (Math.abs(expected) < dead) return false;
+  if (Math.abs(got) < dead) return false;
+  return Math.sign(expected) !== Math.sign(got);
+}
+
 /** 探索を許す範囲に入っているか。外れた手は試さない。 */
 function withinBounds(pose: ViewPose, initialScale: number): boolean {
   if (Math.abs(pose.pitch) > TILT_LIMIT) return false;
@@ -593,25 +646,60 @@ export function registerViews(views: readonly AlignView[], options: RegisterOpti
   const maxCells = Math.max(...grids.map((g) => g.width * g.height), ...measureGrids.map((g) => g.width * g.height));
   const scratch = makeScratch(maxCells);
 
-  const cost = (): number => evaluate(points, grids, cams, poses, mats, frames, scratch).total;
+  const cost = (): number =>
+    evaluate(points, grids, cams, poses, mats, frames, referenceIndex, scratch).total;
 
-  // 段1: 枠の周りで yaw を粗く走査する。view ごとに、他は初期値のまま動かさない。
-  for (let i = 0; i < views.length; i++) {
-    if (i === referenceIndex) continue;
-    const base = poses[i] as ViewPose;
-    let bestYaw = base.yaw;
-    let bestCost = Infinity;
-    for (let d = -yawRange; d <= yawRange + 1e-9; d += yawStep) {
-      poses[i] = { ...base, yaw: base.yaw + d };
+  // 段1: 枠の周りで yaw を粗く走査する。
+  //
+  // **枠と逆向きも一緒に走査する（docs/12 R20）。** 利用者は「右向き」の枠に
+  // 左向きの写真を入れる。設計した本人が最初の実測でそれをやって、3時間ぶん
+  // 遠回りした（docs/12 §12.15.5）。「入れ違いかどうか」を判定してから直す
+  // のではなく、**両方の向きを試して安いほうを採る**。判定が要らないぶん確実で、
+  // 走査は元から安いので値段もほとんど変わらない（段2 の探索が支配的）。
+  //
+  // 2 周するのは、2枚とも入れ違えている場合のため。1 周目は隣がまだ間違った
+  // 向きのまま見えているので、正しく選べないことがある。
+  const expectedYaw = poses.map((p) => p.yaw);
+  const flipped = views.map(() => false);
+  for (let pass = 0; pass < 2; pass++) {
+    for (let i = 0; i < views.length; i++) {
+      if (i === referenceIndex) continue;
+      const base = poses[i] as ViewPose;
+      const expected = expectedYaw[i] as number;
+
+      // 枠どおりの向きと、その逆と、それぞれで最良の角度を探す。
+      const scan = (center: number): { yaw: number; cost: number } => {
+        let bestYaw = center;
+        let bestCost = Infinity;
+        for (let d = -yawRange; d <= yawRange + 1e-9; d += yawStep) {
+          poses[i] = { ...base, yaw: center + d };
+          mats[i] = rotationMatrix(poses[i] as ViewPose);
+          const c = cost();
+          if (c < bestCost) {
+            bestCost = c;
+            bestYaw = center + d;
+          }
+        }
+        return { yaw: bestYaw, cost: bestCost };
+      };
+
+      // どちらの向きから探すか。
+      //
+      // **符号は顔で決める。目的関数では決めない。** 測ってそうなった
+      // （docs/12 §12.15.6）。左右がほぼ対称な体では、符号を変えても目的関数は
+      // 0.3〜0.7% しか動かない。その揺らぎで利用者の指定を覆すと、
+      // 正しく入れた人が損をする。一方、顔ランドマークの**符号**は
+      // 実素材の3枚すべてで正しかった（大きさは半分しか出ないので使わない）。
+      //
+      // 顔が無ければ枠を信じる。枠は利用者が言ったことである。
+      const hint = views[i]?.headYawDeg;
+      const hintFlips = hint !== undefined && isFlipped(expected, (hint * Math.PI) / 180);
+      const take = hintFlips ? scan(-expected) : scan(expected);
+      flipped[i] = hintFlips;
+
+      poses[i] = { ...base, yaw: take.yaw };
       mats[i] = rotationMatrix(poses[i] as ViewPose);
-      const c = cost();
-      if (c < bestCost) {
-        bestCost = c;
-        bestYaw = base.yaw + d;
-      }
     }
-    poses[i] = { ...base, yaw: bestYaw };
-    mats[i] = rotationMatrix(poses[i] as ViewPose);
   }
 
   // 段2: 全 view・全パラメータをまとめてパターン探索で詰める。
@@ -653,12 +741,15 @@ export function registerViews(views: readonly AlignView[], options: RegisterOpti
   }
 
   // 仕上げに M1（IoU）と収まりを view ごとに出す。合格の判定はこちらで行う。
-  const parts = evaluate(points, grids, cams, poses, mats, frames, scratch);
+  const parts = evaluate(points, grids, cams, poses, mats, frames, referenceIndex, scratch);
   // 測るときは被写体全体の点を使う（上のコメント）。重心（frames）は合わせに
   // 使った点のものをそのまま使う。姿勢はそれを前提に解いてあるため。
   const results: ViewResult[] = views.map((v, j) => ({
     slot: v.slot,
     pose: poses[j] as ViewPose,
+    slotFlipped: flipped[j] === true,
+    headYawDisagrees:
+      v.headYawDeg !== undefined && isFlipped(expectedYaw[j] as number, (v.headYawDeg * Math.PI) / 180),
     containmentPx: measureContainment(measurePoints, measureGrids, cams, poses, mats, frames, scratch, j)
       .meanSpill,
     insideRatio: measureContainment(measurePoints, measureGrids, cams, poses, mats, frames, scratch, j)
@@ -671,6 +762,7 @@ export function registerViews(views: readonly AlignView[], options: RegisterOpti
     referenceIndex,
     cost: parts.total,
     worstInsideRatio: Math.min(...results.map((r) => r.insideRatio)),
+    anySlotFlipped: results.some((r) => r.slotFlipped),
   };
 }
 

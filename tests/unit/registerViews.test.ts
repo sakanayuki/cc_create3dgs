@@ -66,12 +66,48 @@ describe('複数枚の位置合わせ（合成データ）', () => {
     expect(got).toBeGreaterThan(60); // まだ届いていない。届くようになったらこの行が落ちる
   }, 120000);
 
-  it('枠を入れ違えると、残差が悪化して気づける（docs/12 R20）', () => {
-    const ok = registerViews([view('front', 0), view('right', RIGHT)], OPTS);
-    // 左向きの写真を「右向き」の枠に入れてしまった場合
-    const swapped = registerViews([view('front', 0), view('right', LEFT)], OPTS);
+  it('枠を入れ違えても、顔の符号で直す（docs/12 R20）', () => {
+    // 左向きの写真を「右向き」の枠に入れてしまった場合。
+    // 顔から測ったヨーが負なら、枠と食い違うので逆向きから探し直す。
+    const v = view('right', LEFT);
+    const res = registerViews([view('front', 0), { ...v, headYawDeg: -45 }], OPTS);
 
-    // 入れ違えたほうが目的関数が悪い。ここが逆転すると R20 の検出が成り立たない。
-    expect(swapped.cost).toBeGreaterThan(ok.cost);
+    // **符号が戻ることが、この仕掛けの仕事である。**
+    // 大きさは実測 −69.2°（真値 −90° に対して 21° の誤差）。枠どおりに入れた
+    // ときの精度（±6°）には届かない。逆向きから探し直すと、走査の中心が
+    // 変わるぶん別の谷に落ち着くため。符号が戻れば向きの取り違えは消えるので、
+    // ここは甘い閾値ではなく、いまの実力をそのまま書いて固定しておく。
+    const got = deg(res.views[1]?.pose.yaw ?? 0);
+    expect(got).toBeLessThan(0);
+    expect(Math.abs(got - -90)).toBeLessThan(25);
+    expect(res.views[1]?.slotFlipped).toBe(true);
+    expect(res.anySlotFlipped).toBe(true);
+  }, 120000);
+
+  it('顔が無ければ枠を信じる（目的関数では符号を決めない）', () => {
+    // **合成の体は左右がほぼ対称なので、目的関数は符号を見分けられない**
+    // （正しい配置 0.00901 に対し、両方反転が 0.00908。差は 0.7%）。
+    // その揺らぎで利用者の指定を覆さない、というのがここの取り決めである。
+    // 顔の手がかりを渡さなければ、入れ違えていても枠のまま解く。
+    const res = registerViews([view('front', 0), view('right', LEFT)], OPTS);
+    expect(res.views[1]?.slotFlipped).toBe(false);
+    expect(deg(res.views[1]?.pose.yaw ?? 0)).toBeGreaterThan(0); // 枠どおり + 側
+  }, 120000);
+
+  it('枠が正しければ、読み替えたとは言わない', () => {
+    const res = registerViews(
+      [view('front', 0), { ...view('right', RIGHT), headYawDeg: 40 }, { ...view('left', LEFT), headYawDeg: -40 }],
+      OPTS,
+    );
+    expect(res.anySlotFlipped).toBe(false);
+    for (const v of res.views) expect(v.slotFlipped).toBe(false);
+  }, 120000);
+
+  it('顔から測ったヨーの符号が枠と食い違えば、そう言う', () => {
+    // 顔の手がかりは大きさが当てにならないので符号だけ使う（docs/12 §12.15.5）。
+    const views = [view('front', 0), view('right', LEFT)];
+    const withHint = [views[0] as AlignView, { ...(views[1] as AlignView), headYawDeg: -45 }];
+    const res = registerViews(withHint, OPTS);
+    expect(res.views[1]?.headYawDisagrees).toBe(true);
   }, 120000);
 });

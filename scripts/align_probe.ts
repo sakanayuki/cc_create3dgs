@@ -24,6 +24,7 @@ interface Meta {
   readonly focalPx: number;
   readonly cx: number;
   readonly cy: number;
+  readonly face?: { readonly yawDeg: number; readonly score: number } | null;
 }
 
 function load(dir: string, slot: ViewSlot): AlignView | null {
@@ -74,6 +75,8 @@ function load(dir: string, slot: ViewSlot): AlignView | null {
     camera: { focalPx: meta.focalPx, cx: meta.cx, cy: meta.cy },
     alpha,
     depth,
+    // 顔から測ったヨー。**符号だけ**使う（docs/12 §12.15.6）。
+    ...(meta.face ? { headYawDeg: meta.face.yawDeg } : {}),
   };
 }
 
@@ -101,6 +104,10 @@ function main(): void {
 
     console.log(`\n── ${label} ── ${ms} ms`);
     console.log(`  目的関数 = ${res.cost.toFixed(5)} / M1（収まり率）の最小 = ${res.worstInsideRatio.toFixed(3)}`);
+    if (res.anySlotFlipped) {
+      const names = res.views.filter((v) => v.slotFlipped).map((v) => v.slot);
+      console.log(`  **枠を読み替えました**: ${names.join(', ')}（docs/12 R20）`);
+    }
     for (const v of res.views) {
       console.log(
         `  ${v.slot.padEnd(5)} yaw=${deg(v.pose.yaw).toFixed(1)}° ` +
