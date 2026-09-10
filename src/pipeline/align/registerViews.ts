@@ -92,9 +92,20 @@ export interface RegisterOptions {
 export interface ViewResult {
   readonly slot: ViewSlot;
   readonly pose: ViewPose;
-  /** この view の点を、他の view のマスクに収めたときの平均はみ出し（画素）。 */
+  /** 他の view から運んできた点の、平均はみ出し（粗いグリッドの画素）。 */
   readonly containmentPx: number;
-  /** M1（docs/12 §12.13）。この view のマスクと、他の view の投影の IoU。 */
+  /**
+   * **M1（docs/12 §12.13）。** 他の view から運んできた点のうち、
+   * この view のマスクの内側に落ちた割合。合っていれば 1 に近づく。
+   */
+  readonly insideRatio: number;
+  /**
+   * 参考値。この view のマスクと、他の view の投影の IoU。
+   *
+   * **1 にはならない。** 正面のマスクの真ん中（胸の正面）は、左右どちらの
+   * 横向きからも見えていないので、他の view の投影では埋まらない。
+   * 当初 M1 をこれで定義したが、構造的に届かない閾値になっていた（docs/12 §12.15.3）。
+   */
   readonly iou: number;
 }
 
@@ -105,8 +116,8 @@ export interface RegisterResult {
   readonly referenceIndex: number;
   /** 目的関数の最終値。小さいほど良い。 */
   readonly cost: number;
-  /** M1 の最小値。合格ラインは 0.90（docs/12 §12.13）。 */
-  readonly worstIou: number;
+  /** M1 の最小値。合格ラインは 0.95（docs/12 §12.13）。 */
+  readonly worstInsideRatio: number;
 }
 
 /**
@@ -123,7 +134,10 @@ export function costAtPoses(
   const gridLongSide = options.gridLongSide ?? 128;
   const samples = options.samplesPerView ?? 3000;
   const grids = views.map((v) =>
-    buildSilhouette(v.alpha, v.width, v.height, { targetLongSide: gridLongSide, depth: v.depth }),
+    buildSilhouette(v.usable ? maskFromUsable(v) : v.alpha, v.width, v.height, {
+      targetLongSide: gridLongSide,
+      depth: v.depth,
+    }),
   );
   const points = views.map((v) => samplePoints(v, samples));
   const cams = views.map((v) => v.camera);
@@ -135,6 +149,30 @@ export function costAtPoses(
   const mats = poses.map((pp) => rotationMatrix(pp));
   const scratch = makeScratch(Math.max(...grids.map((g) => g.width * g.height)));
   return evaluate(points, grids, cams, poses, mats, frames, scratch);
+}
+
+/** `usable` と α の論理積を、α と同じ 0〜255 の形で返す。 */
+function maskFromUsable(v: AlignView): Uint8Array {
+  const n = v.width * v.height;
+  const out = new Uint8Array(n);
+  const usable = v.usable;
+  for (let i = 0; i < n; i++) {
+    const a = v.alpha[i] as number;
+    if (a >= 128 && usable && (usable[i] as number) !== 0) out[i] = a;
+  }
+  return out;
+}
+
+/** `usable` を外した写し。`exactOptionalPropertyTypes` があるので明示的に組み直す。 */
+function withoutUsable(v: AlignView): AlignView {
+  return {
+    slot: v.slot,
+    width: v.width,
+    height: v.height,
+    camera: v.camera,
+    alpha: v.alpha,
+    depth: v.depth,
+  };
 }
 
 /** ある view から取り出した、カメラ座標の点群。 */
@@ -436,6 +474,26 @@ function evaluate(
 const PARAM_KEYS = ['yaw', 'pitch', 'roll', 'scale', 'tx', 'ty', 'tz'] as const;
 type ParamKey = (typeof PARAM_KEYS)[number];
 
+/**
+ * 尺度が初期値から離れてよい割合。
+ *
+ * 尺度はヨー不変の縦の長さから決まっていて（§12.7）、探索で動かすものではない。
+ * docs/12 は「尺度を最適化から外せるので解が安定する」と書いた。完全に外すと
+ * 縦の長さの測り方の誤差を直せないので、±10% だけ許す。
+ * 実素材で外したまま回したら、片方の view が 1.45 倍まで膨らんで壊れた
+ * （docs/12 §12.15.3）。
+ */
+const SCALE_TOLERANCE = 0.1;
+
+/**
+ * pitch と roll の上限[rad]。
+ *
+ * 立っている人を手持ちで撮った3枚で、カメラの傾きがこれを超えることはない。
+ * 上限を置かないと、シルエットの食い違いを傾きで言い訳する解に落ちる
+ * （実素材で 21° の pitch が出た）。
+ */
+const TILT_LIMIT = (12 * Math.PI) / 180;
+
 /** パターン探索の刻み。角度は rad、平行移動はメートル。 */
 const INITIAL_STEP: Readonly<Record<ParamKey, number>> = {
   yaw: (4 * Math.PI) / 180,
@@ -449,6 +507,15 @@ const INITIAL_STEP: Readonly<Record<ParamKey, number>> = {
 
 function withParam(pose: ViewPose, key: ParamKey, value: number): ViewPose {
   return { ...pose, [key]: value };
+}
+
+/** 探索を許す範囲に入っているか。外れた手は試さない。 */
+function withinBounds(pose: ViewPose, initialScale: number): boolean {
+  if (Math.abs(pose.pitch) > TILT_LIMIT) return false;
+  if (Math.abs(pose.roll) > TILT_LIMIT) return false;
+  const lo = initialScale * (1 - SCALE_TOLERANCE);
+  const hi = initialScale * (1 + SCALE_TOLERANCE);
+  return pose.scale >= lo && pose.scale <= hi;
 }
 
 /**
@@ -466,13 +533,31 @@ export function registerViews(views: readonly AlignView[], options: RegisterOpti
   const yawStep = options.yawSearchStep ?? (2 * Math.PI) / 180;
   const maxRounds = options.maxRounds ?? 60;
 
+  // **合わせるときは、点もマスクも「胴と頭」で揃える。**
+  // 胴だけの点を全身のマスクと比べると、収まりは甘くなり、縦の広がりは
+  // 40% も食い違って、錨がでたらめな向きに効く。実素材で実際にそうなった
+  // （docs/12 §12.15.3）。世界の見え方は最適化の中で一貫していないといけない。
   const grids = views.map((v) =>
-    buildSilhouette(v.alpha, v.width, v.height, {
+    buildSilhouette(v.usable ? maskFromUsable(v) : v.alpha, v.width, v.height, {
       targetLongSide: gridLongSide,
       depth: v.depth,
     }),
   );
+  // 測るときは被写体全体で。合格の判定は「全身がどれだけ説明できたか」である。
+  const measureGrids = views.some((v) => v.usable)
+    ? views.map((v) =>
+        buildSilhouette(v.alpha, v.width, v.height, { targetLongSide: gridLongSide, depth: v.depth }),
+      )
+    : grids;
+  // **合わせに使う点と、測る点は別である。**
+  // 合わせるのは胴と頭だけ（usable、docs/12 §12.7）。しかし M1 は被写体全体の
+  // マスクに対して測らないと、胴だけの投影が全身のマスクを覆えるはずもなく、
+  // 「腕を外すと M1 が下がる」という中身のない結果が出る。最初それで測って
+  // 混乱した（docs/12 §12.15.3）。
   const points = views.map((v) => samplePoints(v, samples));
+  const measurePoints = views.some((v) => v.usable)
+    ? views.map((v) => samplePoints(withoutUsable(v), samples))
+    : points;
   const cams = views.map((v) => v.camera);
 
   let referenceIndex = views.findIndex((v) => v.slot === 'front');
@@ -497,6 +582,7 @@ export function registerViews(views: readonly AlignView[], options: RegisterOpti
     return { ...REFERENCE_POSE, yaw: slotYaw(v.slot) - slotYaw((views[referenceIndex] as AlignView).slot), scale };
   });
   const mats = poses.map((p) => rotationMatrix(p));
+  const initialScale = poses.map((p) => p.scale);
 
   // 回転の中心。その view の重心を、基準 view の重心へ運ぶ（rigid.ts 冒頭）。
   const refCentroid = (points[referenceIndex] as ViewPoints).centroid;
@@ -504,7 +590,7 @@ export function registerViews(views: readonly AlignView[], options: RegisterOpti
     i === referenceIndex ? IDENTITY_FRAME : { source: p.centroid, target: refCentroid },
   );
 
-  const maxCells = Math.max(...grids.map((g) => g.width * g.height));
+  const maxCells = Math.max(...grids.map((g) => g.width * g.height), ...measureGrids.map((g) => g.width * g.height));
   const scratch = makeScratch(maxCells);
 
   const cost = (): number => evaluate(points, grids, cams, poses, mats, frames, scratch).total;
@@ -540,7 +626,7 @@ export function registerViews(views: readonly AlignView[], options: RegisterOpti
         const step = steps[key];
         for (const sign of [1, -1]) {
           const trial = withParam(base, key, base[key] + sign * step);
-          if (key === 'scale' && !(trial.scale > 0.2 && trial.scale < 5)) continue;
+          if (!withinBounds(trial, initialScale[i] as number)) continue;
           const keep = poses[i] as ViewPose;
           const keepMat = mats[i] as Mat3;
           poses[i] = trial;
@@ -568,18 +654,23 @@ export function registerViews(views: readonly AlignView[], options: RegisterOpti
 
   // 仕上げに M1（IoU）と収まりを view ごとに出す。合格の判定はこちらで行う。
   const parts = evaluate(points, grids, cams, poses, mats, frames, scratch);
+  // 測るときは被写体全体の点を使う（上のコメント）。重心（frames）は合わせに
+  // 使った点のものをそのまま使う。姿勢はそれを前提に解いてあるため。
   const results: ViewResult[] = views.map((v, j) => ({
     slot: v.slot,
     pose: poses[j] as ViewPose,
-    containmentPx: measureContainment(points, grids, cams, poses, mats, frames, scratch, j),
-    iou: measureIou(points, grids, cams, poses, mats, frames, scratch, j),
+    containmentPx: measureContainment(measurePoints, measureGrids, cams, poses, mats, frames, scratch, j)
+      .meanSpill,
+    insideRatio: measureContainment(measurePoints, measureGrids, cams, poses, mats, frames, scratch, j)
+      .insideRatio,
+    iou: measureIou(measurePoints, measureGrids, cams, poses, mats, frames, scratch, j),
   }));
 
   return {
     views: results,
     referenceIndex,
     cost: parts.total,
-    worstIou: Math.min(...results.map((r) => r.iou)),
+    worstInsideRatio: Math.min(...results.map((r) => r.insideRatio)),
   };
 }
 
@@ -599,7 +690,7 @@ function measureIou(
   return iou(cov, gj.mask);
 }
 
-/** view j のマスクからのはみ出し（画素）。0 なら全部が内側。 */
+/** view j のマスクからのはみ出し。`insideRatio` が M1。 */
 function measureContainment(
   points: readonly ViewPoints[],
   grids: readonly SilhouetteGrid[],
@@ -609,7 +700,7 @@ function measureContainment(
   frames: readonly PoseFrame[],
   scratch: Scratch,
   j: number,
-): number {
+): { readonly meanSpill: number; readonly insideRatio: number } {
   const gj = grids[j] as SilhouetteGrid;
   const cj = cams[j] as CameraIntrinsics;
   const pj = poses[j] as ViewPose;
@@ -617,6 +708,7 @@ function measureContainment(
   const fj = frames[j] as PoseFrame;
   let sum = 0;
   let count = 0;
+  let inside = 0;
   for (let i = 0; i < points.length; i++) {
     if (i === j) continue;
     const pi = points[i] as ViewPoints;
@@ -638,10 +730,15 @@ function measureContainment(
         sum += Math.hypot(gj.width, gj.height);
         continue;
       }
-      sum += gj.distanceToSubject[gy * gj.width + gx] as number;
+      const d = gj.distanceToSubject[gy * gj.width + gx] as number;
+      sum += d;
+      if (d === 0) inside++;
     }
   }
-  return count > 0 ? sum / count : 0;
+  return {
+    meanSpill: count > 0 ? sum / count : 0,
+    insideRatio: count > 0 ? inside / count : 0,
+  };
 }
 
 /** view j のグリッドに、他の view の投影を描く（1画素膨張つき）。 */

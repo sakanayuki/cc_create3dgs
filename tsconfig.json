@@ -16,5 +16,5 @@
     "verbatimModuleSyntax": true,
     "resolveJsonModule": true
   },
-  "include": ["src", "tests", "vite.config.ts", "scripts/*.mjs"]
+  "include": ["src", "tests", "vite.config.ts", "scripts/*.mjs", "scripts/*.ts"]
 }
