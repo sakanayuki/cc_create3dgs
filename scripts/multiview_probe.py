@@ -23,12 +23,16 @@ onnxruntime で回し、**位置合わせの入力だけ**を書き出す。
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
+import urllib.request
 from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageOps
+
+from _registry import Registry
 
 # ImageNet の正規化（src/pipeline/imageOps.ts の IMAGENET_MEAN / STD と同じ値）
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
@@ -38,36 +42,38 @@ IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 WORKING_GRID = 1024
 
 
-def load_registry() -> dict:
-    return json.loads((Path(__file__).resolve().parent.parent / "models" / "registry.json").read_text())
+def fetch(model_id: str, cache: Path) -> tuple[Path, tuple[int, int]]:
+    """registry のモデルを取ってきて、置いた場所と入力寸法を返す。
 
+    **置き場所の知識は `_registry.py` の `Model` だけが持つ。** レジストリの
+    生の辞書を読んで自分でパスを組み立ててはいけない
+    （`scripts/test_quantize.py` の `check_registry_contract` が禁じている）。
+    レジストリに 1 行足しただけで黙って壊れる前提を、散らさないための決まりである。
+    最初この決まりを知らずに生の辞書を読んで、CI に叱られた。
 
-def fetch(model_id: str, cache: Path) -> Path:
-    """registry.json の hf 定義に従ってモデルを落とす（決定 D7 と同じ出どころ）。"""
+    なお検出器は `#` コメントしか除いてくれないので、**この説明の中でも
+    禁じられたキーを字面で書いてはいけない**。それも踏んだ。
+
+    取り方は `fetch_models.py` と同じ。HF から取るモデルと、URL に直接
+    置いてあるモデル（u2netp / face-mesh）の 2 通りがある。
+    """
     from huggingface_hub import hf_hub_download
 
-    entry = load_registry()["models"][model_id]
-    hf = entry["hf"]
-    dest = cache / model_id
-    for name in [hf["file"], *hf.get("extraFiles", [])]:
-        hf_hub_download(repo_id=hf["repo"], filename=name, local_dir=str(dest))
-    return dest / hf["file"]
-
-
-def fetch_url(model_id: str, cache: Path) -> Path:
-    """url + sha256 で直接置いてあるモデル（face-mesh）を落とす。"""
-    import hashlib
-    import urllib.request
-
-    entry = load_registry()["models"][model_id]
-    dest = cache / model_id / Path(entry["url"]).name
+    m = Registry.load().models[model_id]
+    dest = m.raw_path(cache)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    if not dest.exists():
-        urllib.request.urlretrieve(entry["url"], dest)
-    got = hashlib.sha256(dest.read_bytes()).hexdigest()
-    if got != entry["sha256"]:
-        raise RuntimeError(f"{model_id} の sha256 が合いません: {got}")
-    return dest
+
+    if m.url:
+        if not dest.exists():
+            urllib.request.urlretrieve(m.url, dest)  # noqa: S310 - registry の固定 URL
+        got = hashlib.sha256(dest.read_bytes()).hexdigest()
+        if m.sha256 and got != m.sha256:
+            raise RuntimeError(f"{model_id} の sha256 が合いません: {got}")
+        return dest, m.input_size
+
+    for rel in m.hf_files():
+        hf_hub_download(repo_id=m.hf_repo, filename=rel, local_dir=str(cache / m.id))
+    return dest, m.input_size
 
 
 def letterbox(path: Path, size: int) -> tuple[Image.Image, tuple[int, int, int, int]]:
@@ -217,12 +223,9 @@ def main() -> int:
     args.out.mkdir(parents=True, exist_ok=True)
 
     print("モデルを用意します…", flush=True)
-    depth_path = fetch("depth-anything-v3-small", args.cache)
-    matte_path = fetch("modnet", args.cache)
-    face_path = fetch_url("face-mesh", args.cache)
-    reg = load_registry()["models"]
-    depth_size = int(reg["depth-anything-v3-small"]["inputSize"][0])
-    matte_size = int(reg["modnet"]["inputSize"][0])
+    depth_path, (depth_size, _) = fetch("depth-anything-v3-small", args.cache)
+    matte_path, (matte_size, _) = fetch("modnet", args.cache)
+    face_path, _ = fetch("face-mesh", args.cache)
 
     opts = ort.SessionOptions()
     opts.log_severity_level = 3
