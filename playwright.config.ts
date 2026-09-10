@@ -45,9 +45,23 @@ export default defineConfig({
   webServer: {
     // 必ずビルドしてから配信する。dist が古いままだと、直したはずのコードを
     // 検証しないまま通ってしまう（実際に一度それで空振りした）。
-    command: 'npm run build && npm run preview -- --port 4173 --strictPort',
+    //
+    // **`--host 127.0.0.1` を明示する。** これが無いと vite preview は
+    // `localhost` に bind する。GitHub ランナーの `localhost` は `::1` と
+    // `127.0.0.1` の両方に解決し、Node は先頭（多くは `::1`）を掴む。
+    // すると下の `url`（127.0.0.1）には応答が返らず、
+    // 「Timed out waiting 120000ms from config.webServer」で必ず落ちる。
+    // 開発コンテナでは `localhost` が IPv4 だけに解決するので再現しない。
+    // 待つ側と配信する側で名前が食い違わないよう、両方とも数字で書く。
+    command: 'npm run build && npm run preview -- --host 127.0.0.1 --port 4173 --strictPort',
     url: 'http://127.0.0.1:4173',
     reuseExistingServer: !process.env.CI,
-    timeout: 120_000,
+    // 冷えたランナーでは npm ci の直後にビルドが走る。手元では 12 秒だが余裕を持たせる。
+    timeout: 180_000,
+    // **既定では stdout が捨てられる。** 起動しなかったとき、ログに
+    // 「タイムアウトした」以外の手がかりが何も残らない。実際に一度それで
+    // 原因の切り分けができなかったので、両方とも拾う。
+    stdout: 'pipe',
+    stderr: 'pipe',
   },
 });
