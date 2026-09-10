@@ -10,14 +10,15 @@ onnxruntime で回し、**位置合わせの入力だけ**を書き出す。
 
     <out>/<slot>.json       … 幅・高さ・焦点距離・主点
     <out>/<slot>.alpha.u8   … α（uint8, grid×grid）
-    <out>/<slot>.depth.f32  … 深度（float32, grid×grid, 被写体の外は 0）
+    <out>/<slot>.raw.f32    … 深度モデルの**生出力**（float32, grid×grid）
 
 これを `scripts/align_probe.ts` が読んで位置合わせを回す。
 
-**本番のパイプラインの再現ではない。** ③の較正（エッジ保存シャープ化・局所強調・
-断面の丸み…）は入れていない。位置合わせが見ているのはシルエットと大づかみの
-深度だけなので、そこまでは要らない。ここで出す数字は「位置合わせが実写で立つか」
-だけを答える。
+③の較正は**ここではやらない**。生の深度を出して、TypeScript 側（align_probe.ts）が
+本番と同じ `calibrate()` を呼ぶ。最初は較正なしで回したが、DA3 の実寸をそのまま
+使うと被写体までの距離が被写体の高さより近いことになり、透視が実際より強く出た。
+`calibrate()` は「奥行き ÷ 幅」を妥当な帯に収める処理を持っていて、そこが要る
+（docs/12 §12.15.3、docs/03 §3.5.4）。
 """
 from __future__ import annotations
 
@@ -175,10 +176,12 @@ def main() -> int:
         outside[oy : oy + h, ox : ox + w] = False
         alpha[outside] = 0
         depth = depth.astype(np.float32)
-        depth[alpha < 128] = 0.0
 
+        # **生の深度をそのまま出す。** 較正（③）は TypeScript 側の calibrate() に
+        # やらせる。ここで被写体の外を 0 で潰すと、較正が使う分位も外れ値の切り方も
+        # 変わってしまう。位置合わせに渡す深度は align_probe.ts が作る。
         (args.out / f"{slot}.alpha.u8").write_bytes(alpha.astype(np.uint8).tobytes())
-        (args.out / f"{slot}.depth.f32").write_bytes(depth.tobytes())
+        (args.out / f"{slot}.raw.f32").write_bytes(depth.tobytes())
         meta = {
             "slot": slot,
             "source": str(path),
@@ -189,13 +192,13 @@ def main() -> int:
             "cx": args.grid / 2,
             "cy": args.grid / 2,
             "subjectPixels": int((alpha >= 128).sum()),
-            "depthRange": [float(depth[alpha >= 128].min()), float(depth[alpha >= 128].max())],
+            "rawRange": [float(depth[alpha >= 128].min()), float(depth[alpha >= 128].max())],
         }
         (args.out / f"{slot}.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2))
         manifest.append(meta)
         print(
             f"    α={meta['subjectPixels']}px ({100 * meta['subjectPixels'] / args.grid**2:.1f}%) "
-            f"焦点={focal:.1f}px 深度=[{meta['depthRange'][0]:.3f}, {meta['depthRange'][1]:.3f}]",
+            f"焦点={focal:.1f}px 生の深度=[{meta['rawRange'][0]:.3f}, {meta['rawRange'][1]:.3f}]",
             flush=True,
         )
 

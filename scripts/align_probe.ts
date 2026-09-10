@@ -12,6 +12,7 @@
 import { readFileSync, existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { costAtPoses, registerViews, type AlignView } from '../src/pipeline/align/registerViews';
+import { calibrate } from '../src/pipeline/3-calibrate';
 import { torsoAndHead } from '../src/pipeline/align/bodyParts';
 import { REFERENCE_POSE, type ViewPose, type ViewSlot } from '../src/pipeline/align/rigid';
 
@@ -30,9 +31,42 @@ function load(dir: string, slot: ViewSlot): AlignView | null {
   if (!existsSync(metaPath)) return null;
   const meta = JSON.parse(readFileSync(metaPath, 'utf8')) as Meta;
   const alphaBuf = readFileSync(join(dir, `${slot}.alpha.u8`));
-  const depthBuf = readFileSync(join(dir, `${slot}.depth.f32`));
-  const alpha = new Uint8Array(alphaBuf.buffer, alphaBuf.byteOffset, alphaBuf.byteLength);
-  const depth = new Float32Array(depthBuf.buffer, depthBuf.byteOffset, depthBuf.byteLength / 4);
+  const rawBuf = readFileSync(join(dir, `${slot}.raw.f32`));
+  const alpha = new Uint8ClampedArray(
+    new Uint8Array(alphaBuf.buffer, alphaBuf.byteOffset, alphaBuf.byteLength),
+  );
+  const raw = new Float32Array(rawBuf.buffer, rawBuf.byteOffset, rawBuf.byteLength / 4);
+
+  // ③ の較正を本番と同じ関数で通す（docs/03 §3.5）。
+  //
+  // これを飛ばすと、DA3 の実寸そのままでは被写体までの距離が被写体の高さより
+  // 近いことになり、透視が実際より強く出る。calibrate() は「奥行き ÷ 幅」を
+  // 妥当な帯へ収めるので、深度と焦点距離が噛み合う（docs/12 §12.15.4）。
+  //
+  // 顔の箱は渡さない。渡さないと局所強調が体にも 3 倍でかかるので、
+  // reliefBoost は 1 にして強調そのものを止める。位置合わせが見るのは
+  // 大づかみの形で、顔の細かい起伏は要らない。
+  const cal = calibrate({
+    raw,
+    width: meta.width,
+    height: meta.height,
+    alpha,
+    kind: 'depth',
+    focalPx: meta.focalPx,
+    reliefBoost: 1,
+  });
+
+  // 0..65535 の正規化深度を、カメラからの z に戻す。被写体の外は 0。
+  const depth = new Float32Array(raw.length);
+  const span = cal.farZ - cal.nearZ;
+  for (let i = 0; i < depth.length; i++) {
+    depth[i] = (alpha[i] as number) >= 128 ? cal.nearZ + ((cal.depth[i] as number) / 65535) * span : 0;
+  }
+  console.log(
+    `  ${slot}: 較正 nearZ=${cal.nearZ.toFixed(3)} farZ=${cal.farZ.toFixed(3)} ` +
+      `奥行き÷幅=${cal.depthToWidth.toFixed(3)} 奥行き÷高さ=${cal.depthToHeight.toFixed(3)} 実寸=${cal.metric}`,
+  );
+
   return {
     slot,
     width: meta.width,
@@ -88,6 +122,26 @@ function main(): void {
         containmentPx: v.containmentPx,
       })),
     };
+  }
+
+  // 片方ずつ振る。左右をまとめて振ると、非対称な解を見落とす。
+  console.log('\n── 片方ずつ振ってみる（もう片方は 90° に固定） ──');
+  {
+    const usable2 = views.map((v) => ({ ...v, usable: torsoAndHead(v.alpha, v.width, v.height) }));
+    for (const moving of ['right', 'left'] as const) {
+      const row: string[] = [];
+      for (let d = 30; d <= 120; d += 10) {
+        const poses: ViewPose[] = views.map((v) => {
+          if (v.slot === 'front') return REFERENCE_POSE;
+          const sign = v.slot === 'right' ? 1 : -1;
+          const angle = v.slot === moving ? d : 90;
+          return { ...REFERENCE_POSE, yaw: (sign * angle * Math.PI) / 180, scale: 1.05 };
+        });
+        const c = costAtPoses(usable2, poses, { samplesPerView: 2500, gridLongSide: 128 });
+        row.push(`${d}:${c.containment.toFixed(4)}`);
+      }
+      console.log(`  ${moving} を振る（収まり）: ${row.join('  ')}`);
+    }
   }
 
   // 手で置いた ±90° と、見つけた姿勢のコストを比べる。
