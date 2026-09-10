@@ -54,6 +54,22 @@ def fetch(model_id: str, cache: Path) -> Path:
     return dest / hf["file"]
 
 
+def fetch_url(model_id: str, cache: Path) -> Path:
+    """url + sha256 で直接置いてあるモデル（face-mesh）を落とす。"""
+    import hashlib
+    import urllib.request
+
+    entry = load_registry()["models"][model_id]
+    dest = cache / model_id / Path(entry["url"]).name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if not dest.exists():
+        urllib.request.urlretrieve(entry["url"], dest)
+    got = hashlib.sha256(dest.read_bytes()).hexdigest()
+    if got != entry["sha256"]:
+        raise RuntimeError(f"{model_id} の sha256 が合いません: {got}")
+    return dest
+
+
 def letterbox(path: Path, size: int) -> tuple[Image.Image, tuple[int, int, int, int]]:
     """長辺を size に合わせ、正方形の中央に置く（src/pipeline/0-preprocess.ts と同じ考え）。"""
     im = ImageOps.exif_transpose(Image.open(path).convert("RGB"))
@@ -122,6 +138,66 @@ def run_depth(session, img: Image.Image, size: int, grid: int) -> tuple[np.ndarr
     return d, fx * (grid / size)
 
 
+# MediaPipe Face Mesh の landmark 番号。顔の左右の端。
+# 234 が被写体から見て右側、454 が左側（正面を向いていれば 234 が画像の左に写る）。
+LM_RIGHT_SIDE = 234
+LM_LEFT_SIDE = 454
+LM_NOSE_TIP = 1
+
+
+def head_box(alpha: np.ndarray) -> tuple[int, int, int] | None:
+    """マットから頭のあたりの正方形を当てる（顔検出モデルは載せない、registry の方針）。"""
+    ys, xs = np.nonzero(alpha >= 128)
+    if len(ys) == 0:
+        return None
+    top, bottom = int(ys.min()), int(ys.max())
+    h = bottom - top + 1
+    band = (ys >= top) & (ys <= top + 0.20 * h)
+    bx = xs[band]
+    if len(bx) == 0:
+        return None
+    cx = int((bx.min() + bx.max()) / 2)
+    side = int(max(bx.max() - bx.min() + 1, 0.18 * h) * 1.5)
+    cy = int(top + side * 0.45)
+    return cx - side // 2, cy - side // 2, side
+
+
+def head_yaw(session, img: Image.Image, alpha: np.ndarray) -> dict | None:
+    """顔の 3D landmark から頭のヨーを測る（docs/12 §12.15.5）。
+
+    landmark は x/y/z が同じ尺度で返る（z は頭の中心を原点にした相対値、
+    小さいほど手前）。顔の左右の端を結んだベクトルを x–z 平面で見れば、
+    それがそのまま頭の向きになる。
+
+        正面を向く … ベクトルは +x（画像の右）→ ヨー 0
+        画面の右を向く … ベクトルは +z（奥）→ ヨー +90°
+
+    符号の約束は `src/pipeline/align/rigid.ts` の ViewPose.yaw と同じにしてある。
+    """
+    box = head_box(alpha)
+    if box is None:
+        return None
+    x0, y0, side = box
+    patch = img.crop((x0, y0, x0 + side, y0 + side)).resize((256, 256), Image.BILINEAR)
+    x = (np.asarray(patch, dtype=np.float32) / 255.0)[None]  # NHWC, 0..1（正規化しない）
+    outs = session.run(None, {session.get_inputs()[0].name: x})
+    lm = np.asarray(outs[0]).reshape(-1, 3)
+    score = float(np.asarray(outs[1]).reshape(-1)[0])
+
+    v = lm[LM_LEFT_SIDE] - lm[LM_RIGHT_SIDE]
+    yaw = float(np.degrees(np.arctan2(v[2], v[0])))
+    # 鼻がどれだけ前に出ているかも見る（顔らしさの目安）
+    center = (lm[LM_LEFT_SIDE] + lm[LM_RIGHT_SIDE]) / 2
+    nose = lm[LM_NOSE_TIP] - center
+    return {
+        "yawDeg": yaw,
+        "score": score,
+        "faceWidthPx": float(np.linalg.norm(v)),
+        "noseForward": float(-nose[2]),
+        "box": [x0, y0, side],
+    }
+
+
 SLOTS = ("front", "right", "left")
 
 
@@ -143,6 +219,7 @@ def main() -> int:
     print("モデルを用意します…", flush=True)
     depth_path = fetch("depth-anything-v3-small", args.cache)
     matte_path = fetch("modnet", args.cache)
+    face_path = fetch_url("face-mesh", args.cache)
     reg = load_registry()["models"]
     depth_size = int(reg["depth-anything-v3-small"]["inputSize"][0])
     matte_size = int(reg["modnet"]["inputSize"][0])
@@ -151,6 +228,7 @@ def main() -> int:
     opts.log_severity_level = 3
     depth_sess = ort.InferenceSession(str(depth_path), opts, providers=["CPUExecutionProvider"])
     matte_sess = ort.InferenceSession(str(matte_path), opts, providers=["CPUExecutionProvider"])
+    face_sess = ort.InferenceSession(str(face_path), opts, providers=["CPUExecutionProvider"])
 
     present = [(slot, getattr(args, slot)) for slot in SLOTS if getattr(args, slot) is not None]
     for slot, path in present:
@@ -180,6 +258,8 @@ def main() -> int:
         # **生の深度をそのまま出す。** 較正（③）は TypeScript 側の calibrate() に
         # やらせる。ここで被写体の外を 0 で潰すと、較正が使う分位も外れ値の切り方も
         # 変わってしまう。位置合わせに渡す深度は align_probe.ts が作る。
+        face = head_yaw(face_sess, img, alpha)
+
         (args.out / f"{slot}.alpha.u8").write_bytes(alpha.astype(np.uint8).tobytes())
         (args.out / f"{slot}.raw.f32").write_bytes(depth.tobytes())
         meta = {
@@ -193,6 +273,7 @@ def main() -> int:
             "cy": args.grid / 2,
             "subjectPixels": int((alpha >= 128).sum()),
             "rawRange": [float(depth[alpha >= 128].min()), float(depth[alpha >= 128].max())],
+            "face": face,
         }
         (args.out / f"{slot}.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2))
         manifest.append(meta)
@@ -201,6 +282,14 @@ def main() -> int:
             f"焦点={focal:.1f}px 生の深度=[{meta['rawRange'][0]:.3f}, {meta['rawRange'][1]:.3f}]",
             flush=True,
         )
+        if face:
+            print(
+                f"    顔: ヨー={face['yawDeg']:+.1f}° 確からしさ={face['score']:.2f} "
+                f"顔幅={face['faceWidthPx']:.1f}px 鼻の出={face['noseForward']:+.1f}",
+                flush=True,
+            )
+        else:
+            print("    顔: 取れませんでした", flush=True)
 
     (args.out / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2))
     print(f"書き出しました: {args.out}")
