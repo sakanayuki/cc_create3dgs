@@ -9,12 +9,11 @@
  * **「まず動かして見せる」ところまで。** docs/12 §12.5 のうち、
  *
  *   ⓪①②③ … 既存の `generate()` をそのまま view ごとに回す（品質の工夫は全部効く）
- *   Ⓐ Ⓑ  … `registerViews()`。実素材で M1 = 0.985 まで確かめてある（§12.15.5）
- *   Ⓒ    … `mergeBuilds()`。**重複除去はまだ無い。並べるだけ**
+ *   Ⓐ Ⓑ  … `registerViews()`。実素材で M1 = 0.969（§12.16.5）
+ *   Ⓒ    … `mergeBuilds()`。重なった面を落とす。実素材で二重率 24.7% → 2.5%
  *   Ⓓ    … **まだ無い**（色合わせ）
  *
- * したがって点の数は view の数だけ増え、両方から見えている面は二重に置かれる。
- * 実物の見え方を見てから、重複除去と色合わせを詰める。
+ * 色合わせが無いので、view ごとの露出差は継ぎ目の色差として残る。
  *
  * ## 時間
  *
@@ -23,7 +22,7 @@
  * **10 秒の SLO には収まらない。** 決定 D30 で複数枚モードは別 SLO にしてある。
  */
 import { generate, type GenerateOptions, type GenerateResult, type SubjectMode } from './generate';
-import { mergeBuilds, type MergeSource } from './align/mergeViews';
+import { mergeBuilds, type MergeSource, type MergeStats } from './align/mergeViews';
 import { registerViews, type AlignView, type RegisterResult } from './align/registerViews';
 import { torsoAndHead } from './align/bodyParts';
 import { type ViewSlot } from './align/rigid';
@@ -246,6 +245,8 @@ export interface GenerateMultiResult {
   readonly registration: RegisterResult;
   /** 合わなかったので外した枠。空なら全部使った。 */
   readonly droppedSlots: readonly ViewSlot[];
+  /** 合成の内訳（重複をいくつ落としたか）。合成しなかったときは null。 */
+  readonly mergeStats: MergeStats | null;
   readonly metricFix: number;
 }
 
@@ -418,11 +419,12 @@ export async function generateMulti(
       views: results,
       registration,
       droppedSlots: dropped,
+      mergeStats: null,
       metricFix: refResult.metricFix,
     };
   }
 
-  // --- Ⓒ 合成（重複除去はまだ無い）
+  // --- Ⓒ 合成（重なった面を落とす。docs/12 §12.8）
   report(0.96, `${active.length}枚を1つにまとめています`);
   const sources: MergeSource[] = active.map((r, i) => {
     const view = registration.views[i];
@@ -444,6 +446,7 @@ export async function generateMulti(
     views: results,
     registration,
     droppedSlots: dropped,
+    mergeStats: build.mergeStats,
     metricFix: active[refIndex]?.result.metricFix ?? 1,
   };
 }

@@ -10,60 +10,15 @@
  *
  * 本番の経路ではない。線を引く場所を数字で決めるための道具である。
  */
-import { readFileSync, existsSync, writeFileSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   measureAtPoses,
   registerViews,
   type AlignView,
 } from '../src/pipeline/align/registerViews';
-import { calibrate } from '../src/pipeline/3-calibrate';
-import { REFERENCE_POSE, type ViewPose, type ViewSlot } from '../src/pipeline/align/rigid';
-
-interface Meta {
-  readonly slot: ViewSlot;
-  readonly width: number;
-  readonly height: number;
-  readonly focalPx: number;
-  readonly cx: number;
-  readonly cy: number;
-  readonly face?: { readonly yawDeg: number } | null;
-}
-
-function load(dir: string, slot: ViewSlot): AlignView | null {
-  const metaPath = join(dir, `${slot}.json`);
-  if (!existsSync(metaPath)) return null;
-  const meta = JSON.parse(readFileSync(metaPath, 'utf8')) as Meta;
-  const alphaBuf = readFileSync(join(dir, `${slot}.alpha.u8`));
-  const rawBuf = readFileSync(join(dir, `${slot}.raw.f32`));
-  const alpha = new Uint8ClampedArray(
-    new Uint8Array(alphaBuf.buffer, alphaBuf.byteOffset, alphaBuf.byteLength),
-  );
-  const raw = new Float32Array(rawBuf.buffer, rawBuf.byteOffset, rawBuf.byteLength / 4);
-  const cal = calibrate({
-    raw,
-    width: meta.width,
-    height: meta.height,
-    alpha,
-    kind: 'depth',
-    focalPx: meta.focalPx,
-    reliefBoost: 1,
-  });
-  const depth = new Float32Array(raw.length);
-  const span = cal.farZ - cal.nearZ;
-  for (let i = 0; i < depth.length; i++) {
-    depth[i] = (alpha[i] as number) >= 128 ? cal.nearZ + ((cal.depth[i] as number) / 65535) * span : 0;
-  }
-  return {
-    slot,
-    width: meta.width,
-    height: meta.height,
-    camera: { focalPx: meta.focalPx, cx: meta.cx, cy: meta.cy },
-    alpha,
-    depth,
-    ...(meta.face ? { headYawDeg: meta.face.yawDeg } : {}),
-  };
-}
+import { loadProbeViews } from './probeData';
+import { REFERENCE_POSE, type ViewPose } from '../src/pipeline/align/rigid';
 
 const rad = (d: number): number => (d * Math.PI) / 180;
 const f3 = (x: number): string => x.toFixed(3);
@@ -89,8 +44,7 @@ function row(label: string, note: string, views: readonly AlignView[], poses: re
 
 function main(): void {
   const dir = process.argv[2] ?? 'tests/multiview-probe';
-  const slots: ViewSlot[] = ['front', 'right', 'left'];
-  const views = slots.map((s) => load(dir, s)).filter((v): v is AlignView => v !== null);
+  const views = loadProbeViews(dir).map((p) => p.view);
   if (views.length < 2) {
     console.error(`${dir} に view が足りません（${views.length} 枚）`);
     process.exit(1);

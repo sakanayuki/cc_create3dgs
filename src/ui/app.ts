@@ -438,6 +438,11 @@ function multiStatsHtml(r: GenerateMultiResult): string {
          r.droppedSlots.length > 0 ? `<span class="k">（${r.views.length} 枚中）</span>` : ''
        }</span></div>
        <div class="stat"><span class="k">合わせの残差（最小）</span><span class="v">${(r.registration.worstInsideRatio * 100).toFixed(1)}%</span></div>
+       ${
+         r.mergeStats
+           ? `<div class="stat"><span class="k">重なりを落とした</span><span class="v">${r.mergeStats.dropped.toLocaleString('ja-JP')}<span class="k"> / ${r.mergeStats.before.toLocaleString('ja-JP')}</span></span></div>`
+           : ''
+       }
        <div class="stat"><span class="k">生成時間</span><span class="v">${(totalMs / 1000).toFixed(1)} s</span></div>
      </div>
      ${
@@ -453,8 +458,8 @@ function multiStatsHtml(r: GenerateMultiResult): string {
          : ''
      }
      <p class="note">
-       <strong>重複除去と色合わせはまだ入っていません（docs/12 §12.8, §12.9）。</strong>
-       両方の写真から見えている面は二重に置かれ、写真ごとの露出差は継ぎ目の色差として出ます。
+       <strong>色合わせはまだ入っていません（docs/12 §12.9）。</strong>
+       写真ごとの露出差が継ぎ目の色差として出ることがあります。
      </p>
      <details><summary>view ごとの位置合わせ</summary><pre class="mono">${esc(rows)}</pre></details>`;
 }
