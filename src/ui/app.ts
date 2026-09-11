@@ -103,6 +103,24 @@ function currentMode(): SubjectMode {
   return (el?.value as SubjectMode) ?? 'person';
 }
 
+/**
+ * 生成を始めるときに、前回の結果を捨てる。
+ *
+ * **プレビューは結果が確定する前に画面を出す。** 前回の結果を残したままだと、
+ * 「画面には新しい写真、保存すると前回の立体」という食い違いが起きる
+ * （PR #4 のレビューで指摘された）。書き出しの口も、結果が入るまで閉じておく。
+ */
+function beginRun(): void {
+  delete state.result;
+  delete state.multi;
+  $<HTMLButtonElement>('save').disabled = true;
+}
+
+/** 結果が確定したので、書き出せるようにする。 */
+function endRun(): void {
+  $<HTMLButtonElement>('save').disabled = false;
+}
+
 function setProgress(fraction: number, label: string): void {
   ($('bar').firstElementChild as HTMLElement).style.width = `${Math.round(fraction * 100)}%`;
   $('stage').textContent = label;
@@ -167,8 +185,7 @@ async function run(file: File): Promise<void> {
     show('work');
     setProgress(0, '準備しています');
     $('workError').hidden = true;
-    // 1枚モードの結果が、前回の複数枚の合成結果で書き出されないようにする。
-    delete state.multi;
+    beginRun();
 
     const cap = state.capability ?? (await detectCapability());
     const preset = PRESETS[currentPreset()];
@@ -204,6 +221,7 @@ async function run(file: File): Promise<void> {
       }),
     );
     state.result = result;
+    endRun();
 
     show('view');
     $('refining').hidden = true;
@@ -288,6 +306,7 @@ async function runMulti(): Promise<void> {
     show('work');
     setProgress(0, '準備しています');
     $('workError').hidden = true;
+    beginRun();
 
     const cap = state.capability ?? (await detectCapability());
     const preset = PRESETS[currentPreset()];
@@ -317,6 +336,7 @@ async function runMulti(): Promise<void> {
     // 書き出しは基準 view の結果を土台にする（実寸倍率などがそこに乗っている）。
     const ref = result.views[result.registration.referenceIndex]?.result;
     if (ref) state.result = ref;
+    endRun();
 
     show('view');
     $('refining').hidden = true;
@@ -336,6 +356,17 @@ async function runMulti(): Promise<void> {
 const SLOT_LABEL: Record<ViewSlot, string> = { front: '正面', right: '右向き', left: '左向き' };
 
 function multiStatsHtml(r: GenerateMultiResult): string {
+  if (!r.merged) {
+    // 合成しなかった。画面には基準 view 1枚ぶんが出ている（docs/12 R17）。
+    const rows = r.registration.views
+      .map((v) => `${SLOT_LABEL[v.slot].padEnd(4, '　')} 一致度 ${(v.insideRatio * 100).toFixed(1)}%`)
+      .join('\n');
+    return `<div class="card warn" style="margin:0">
+         <h3>3枚を合わせられませんでした</h3>
+         <p>${esc(r.fallbackReason ?? '')}</p>
+       </div>
+       <details><summary>view ごとの一致度</summary><pre class="mono">${esc(rows)}</pre></details>`;
+  }
   const deg = (rad: number): string => `${((rad * 180) / Math.PI).toFixed(1)}°`;
   const totalMs = r.views.reduce(
     (a, v) => a + Object.values(v.result.stats.timings).reduce((x, y) => x + y, 0),

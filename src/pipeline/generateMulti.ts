@@ -50,19 +50,64 @@ export interface GenerateMultiOptions {
   readonly fineGridRatio?: number;
 }
 
-export interface GenerateMultiResult {
-  readonly build: SplatBuild;
-  /** view ごとの生成結果。統計の表示に使う。 */
-  readonly views: readonly { readonly slot: ViewSlot; readonly result: GenerateResult }[];
-  readonly registration: RegisterResult;
-  readonly metricFix: number;
-}
+/**
+ * 合成を許す M1（収まり率）の下限（docs/12 §12.13）。
+ *
+ * これを割ったら、**合成しない**。同じ人物・同じ場所でない3枚や、
+ * カメラが動いた3枚を入れられると位置合わせは解けず、そのまま重ねると
+ * 見るに堪えない立体が出る。しかも利用者には理由が分からない。
+ * docs/12 §12.14 R17 / R21 は「閾値を割ったら諦めて正面1枚を出し、
+ * 理由を日本語で伝える」と決めている。
+ */
+const MIN_INSIDE_RATIO = 0.95;
 
 const SLOT_LABEL: Record<ViewSlot, string> = {
   front: '正面',
   right: '右向き',
   left: '左向き',
 };
+
+/**
+ * 位置合わせの結果が、合成してよいものかを判定する（docs/12 R17 / R21）。
+ *
+ * 合成の手前に必ず通す。ここを通さずに重ねると、解けていない姿勢のまま
+ * 壊れた立体が画面と書き出しに出て、利用者には理由が分からない。
+ *
+ * 純粋な関数にしてあるのは、**試験できるようにするため**である。
+ * `generateMulti` ごと動かすにはモデルの推論が要り、単体試験では回せない。
+ */
+export function registrationGate(registration: RegisterResult): {
+  readonly ok: boolean;
+  /** 通らなかったとき、いちばん合っていなかった view。 */
+  readonly worst: RegisterResult['views'][number];
+} {
+  const worst = registration.views.reduce((a, b) => (a.insideRatio <= b.insideRatio ? a : b));
+  return { ok: registration.worstInsideRatio >= MIN_INSIDE_RATIO, worst };
+}
+
+/** 合成できなかったときに利用者へ出す説明（docs/12 R17）。 */
+export function fallbackMessage(worst: RegisterResult['views'][number], refSlot: ViewSlot): string {
+  return (
+    `写真どうしの向きが合いませんでした（${SLOT_LABEL[worst.slot]}の一致度 ` +
+    `${(worst.insideRatio * 100).toFixed(0)}%、必要 ${MIN_INSIDE_RATIO * 100}%）。` +
+    `同じ人物・同じ姿勢・同じ場所で、その場で向きだけ変えて撮った写真かを確かめてください。` +
+    `今回は${SLOT_LABEL[refSlot]}の1枚だけで作りました。`
+  );
+}
+
+export interface GenerateMultiResult {
+  readonly build: SplatBuild;
+  /**
+   * 合成できたか。false なら `build` は基準 view 1枚ぶんで、
+   * `fallbackReason` に理由が入る（docs/12 R17）。
+   */
+  readonly merged: boolean;
+  readonly fallbackReason: string | null;
+  /** view ごとの生成結果。統計の表示に使う。 */
+  readonly views: readonly { readonly slot: ViewSlot; readonly result: GenerateResult }[];
+  readonly registration: RegisterResult;
+  readonly metricFix: number;
+}
 
 /**
  * view ごとの結果から、位置合わせの入力を作る。
@@ -138,9 +183,29 @@ export async function generateMulti(
   const alignViews = results.map((r) => toAlignView(r.slot, r.result, grid));
   const registration = registerViews(alignViews);
 
+  // --- 合成する前に、位置合わせが立ったかを見る（docs/12 R17 / R21）
+  //
+  // **ここを通さずに合成してはいけない。** 解けていない姿勢で重ねると、
+  // 壊れた立体がそのまま画面と書き出しに出る。利用者には何が起きたか
+  // 分からない。設計にはゲートにすると書いてあったのに、実装で抜けていた。
+  const refIndex = registration.referenceIndex;
+  const gate = registrationGate(registration);
+  if (!gate.ok) {
+    const refResult = results[refIndex]?.result;
+    if (!refResult) throw new Error('基準 view の結果がありません');
+    report(1, '1枚だけで作りました');
+    return {
+      build: refResult.build,
+      merged: false,
+      fallbackReason: fallbackMessage(gate.worst, results[refIndex]?.slot ?? 'front'),
+      views: results,
+      registration,
+      metricFix: refResult.metricFix,
+    };
+  }
+
   // --- Ⓒ 合成（重複除去はまだ無い）
   report(0.96, '3枚を1つにまとめています');
-  const refIndex = registration.referenceIndex;
   const sources: MergeSource[] = results.map((r, i) => {
     const view = registration.views[i];
     if (!view) throw new Error(`位置合わせの結果が足りません: ${i}`);
@@ -154,8 +219,10 @@ export async function generateMulti(
   report(1, '完成しました');
   return {
     build,
+    merged: true,
+    fallbackReason: null,
     views: results,
     registration,
-    metricFix: (results[refIndex]?.result.metricFix ?? 1),
+    metricFix: results[refIndex]?.result.metricFix ?? 1,
   };
 }
