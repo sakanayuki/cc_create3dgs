@@ -24,3 +24,7 @@ playwright-report/
 # Python のバイトコード（誤ってコミットされていた）
 __pycache__/
 *.pyc
+
+# 実素材で位置合わせを測るときの中間ファイル（scripts/multiview_probe.py）
+.cache/
+tests/multiview-probe/
