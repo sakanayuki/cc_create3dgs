@@ -60,6 +60,19 @@ async function makePhoto(): Promise<{ name: string; mimeType: string; buffer: Bu
 
 test.describe('本体アプリ', () => {
   test('写真を選ぶと生成画面に移り、必ず結果か理由に行き着く', async ({ page }) => {
+    // **この検査は二段で待つ。** 持ち時間は両方を足して取らないといけない。
+    //
+    //   支度（#env 30s → #work 15s → #stage 60s）   最大 約 1.8 分
+    //   ① 結果か理由に行き着くまで                    最大 8 分
+    //   ② 仕上げが終わって統計が埋まるまで             最大 10 分
+    //                                             合計 約 20 分
+    //
+    // ①だけを見て全体を 12 分にしたら、①が長引いたぶん②が削られて、
+    // 結局ランナーの速さで落ちる形が残っていた（PR #5 のレビューで指摘された）。
+    // 全体の上限（playwright.config.ts の 10 分）は他の検査のために据え置き、
+    // 重いこの検査にだけ持ち時間を与える。
+    test.setTimeout(22 * 60 * 1000);
+
     const errors: string[] = [];
     page.on('pageerror', (e) => errors.push(e.message));
 
