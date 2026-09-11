@@ -14,6 +14,7 @@ import { configureOrt, ortDevice, type Backend } from '../runtime/OrtSession';
 import { isolationSummary } from '../runtime/crossOriginIsolation';
 import { EXPORT_FORMATS, toSplatFile, type ExportFormat } from './export';
 import { Viewer } from './viewer';
+import type { SplatBuild } from '../pipeline/6-splats';
 
 export type Preset = 'light' | 'standard' | 'high' | 'multi';
 
@@ -114,16 +115,47 @@ function beginRun(): void {
   delete state.result;
   delete state.multi;
   $<HTMLButtonElement>('save').disabled = true;
+  $('viewProgress').hidden = true;
+  $('refining').hidden = true;
 }
 
-/** 結果が確定したので、書き出せるようにする。 */
+/** 結果が確定したので、書き出せるようにする。途中経過の表示は畳む。 */
 function endRun(): void {
   $<HTMLButtonElement>('save').disabled = false;
+  $('viewProgress').hidden = true;
+  $('refining').hidden = true;
 }
 
+/**
+ * 下書きを見せる。**まだ続きがあることを画面に残したまま**切り替える。
+ *
+ * `note` は「いま何が残っているか」。ここを空にしてはいけない。
+ */
+function showDraft(viewer: Viewer, build: SplatBuild, note: string): void {
+  show('view');
+  $('refining').hidden = false;
+  $('refining').textContent = note;
+  $('viewProgress').hidden = false;
+  $('stats').innerHTML = '';
+  viewer.resize();
+  viewer.setSplats(build.data, build.count);
+}
+
+/**
+ * 進捗を出す。**「つくっています」と「できました」の両方に書く。**
+ *
+ * 下書きのプレビューを出した時点で画面は「できました」へ移る。そこに進捗が
+ * 無いと、まだ続きがあるのに終わったように見える。1枚モードでは残りが
+ * インペイントだけなので実害が小さかったが、複数枚モードでは**残り2枚の生成と
+ * 位置合わせがまるごと残っている**。実際に「正面の出力で完了してしまった」
+ * という報告を受けた。見えない場所に進捗を書いていたのが原因である。
+ */
 function setProgress(fraction: number, label: string): void {
-  ($('bar').firstElementChild as HTMLElement).style.width = `${Math.round(fraction * 100)}%`;
+  const pct = `${Math.round(fraction * 100)}%`;
+  ($('bar').firstElementChild as HTMLElement).style.width = pct;
   $('stage').textContent = label;
+  ($('bar2').firstElementChild as HTMLElement).style.width = pct;
+  $('stage2').textContent = label;
 }
 
 /** ビューアは1つだけ作って使い回す。作り直すと GPU の資源を無駄に取り直す。 */
@@ -169,6 +201,16 @@ async function withInferenceFallback<T>(
     if (first === 'wasm') throw e;
     // 何が起きたかは残す。黙って遅くなると、原因を追う手がかりが消える。
     console.warn('[photosplat] WebGPU での推論に失敗したので WASM でやり直します', e);
+    // やり直しは**最初の1枚から**やり直す。複数枚モードでは下書きを見せた
+    // あとに起きうるので、そのときは「できました」の画面に出さないと誰にも
+    // 見えない。黙って長時間止まったように見えるのを避ける。
+    $('viewProgress').hidden = false;
+    if (!$('view').hidden) {
+      $('refining').hidden = false;
+      $('refining').textContent =
+        'WebGPU での推論に失敗したため、互換モード（WASM）で最初からやり直しています。' +
+        'ここから時間がかかります。';
+    }
     setProgress(0, 'WebGPU で失敗したため、互換モード（WASM）でやり直しています');
     return await attempt('wasm');
   }
@@ -212,11 +254,11 @@ async function run(file: File): Promise<void> {
       onPreview: (b) => {
         // プレビューは「まだ仕上げ中」の下書き。黙って出すと、統計が空のまま
         // 止まって見え、終わったのか壊れたのか分からない。
-        show('view');
-        $('refining').hidden = false;
-        $('stats').innerHTML = '';
-        viewer.resize();
-        viewer.setSplats(b.data, b.count);
+        showDraft(
+          viewer,
+          b,
+          'これは下書きです。隠れていた部分を描いて仕上げています…（回して見られます）',
+        );
       },
       }),
     );
@@ -323,12 +365,18 @@ async function runMulti(): Promise<void> {
         shaderF16: cap.shaderF16,
         onProgress: setProgress,
         // 1枚目ができた時点で見せる。3枚ぶん待たせない。
+        //
+        // **ここは「できました」ではない。** 残り (photos.length - 1) 枚の生成と
+        // 位置合わせがまるごと後ろに控えている。下のバーが動いているあいだは
+        // まだ途中である、と読める文にしておく。
         onPreview: (b) => {
-          show('view');
-          $('refining').hidden = false;
-          $('stats').innerHTML = '';
-          viewer.resize();
-          viewer.setSplats(b.data, b.count);
+          showDraft(
+            viewer,
+            b,
+            `${SLOT_LABEL[photos[0]?.slot ?? 'front']}1枚ぶんの下書きです。` +
+              `残り${photos.length - 1}枚の処理と位置合わせが続いています。` +
+              `下のバーが進みきるまでお待ちください（回して見られます）。`,
+          );
         },
       }),
     );

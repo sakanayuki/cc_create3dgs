@@ -169,17 +169,29 @@ export async function generateMulti(
       ...(options.inpaint !== undefined ? { inpaint: options.inpaint } : {}),
       ...(options.depthTiles !== undefined ? { depthTiles: options.depthTiles } : {}),
       ...(options.fineGridRatio !== undefined ? { fineGridRatio: options.fineGridRatio } : {}),
+      // 「何枚目か」を必ず出す。これが無いと、1枚目の下書きが出た時点で
+      // 終わったように見える（実機でそう報告された）。
       onProgress: (f, label) =>
-        report(base + f * perView, `${SLOT_LABEL[photo.slot]}: ${label}`),
+        report(
+          base + f * perView,
+          `[${i + 1}/${photos.length}] ${SLOT_LABEL[photo.slot]}: ${label}`,
+        ),
       // 1枚目（正面）だけ、できた時点で見せる。3枚待たせない。
       ...(i === 0 && options.onPreview ? { onPreview: options.onPreview } : {}),
     };
+    const t0 = performance.now();
     const result = await generate(photo.blob, opts);
+    // どこまで進んだかを残す。画面が固まって見えたときに、どの view で
+    // 止まったのかが分からないと追えない。
+    console.info(
+      `[photosplat] 複数枚 ${i + 1}/${photos.length} (${photo.slot}) 完了 ` +
+        `${Math.round(performance.now() - t0)} ms / ${result.build.count} splats`,
+    );
     results.push({ slot: photo.slot, result });
   }
 
   // --- Ⓑ 位置合わせ
-  report(0.88, '3枚の向きを合わせています');
+  report(0.88, `${photos.length}枚の向きを合わせています`);
   const alignViews = results.map((r) => toAlignView(r.slot, r.result, grid));
   const registration = registerViews(alignViews);
 
@@ -205,7 +217,7 @@ export async function generateMulti(
   }
 
   // --- Ⓒ 合成（重複除去はまだ無い）
-  report(0.96, '3枚を1つにまとめています');
+  report(0.96, `${photos.length}枚を1つにまとめています`);
   const sources: MergeSource[] = results.map((r, i) => {
     const view = registration.views[i];
     if (!view) throw new Error(`位置合わせの結果が足りません: ${i}`);

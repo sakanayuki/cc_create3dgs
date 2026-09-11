@@ -168,6 +168,16 @@ input[type=file]{font:inherit;font-size:13.5px}
     <p class="note" id="refining" hidden>
       これは下書きです。隠れていた部分を描いて仕上げています…（回して見られます）
     </p>
+    <!--
+      下書きを見せたあとも処理は続く。とくに複数枚モードでは、ここから
+      2枚目・3枚目の生成と位置合わせが残っている。進捗を「つくっています」の
+      画面に置いたままにすると、切り替えた瞬間に見えなくなり、
+      終わったように見える（実際にそう報告された）。だから進捗はこちらにも出す。
+    -->
+    <div class="card" id="viewProgress" hidden style="margin-top:10px">
+      <div class="bar" id="bar2"><span></span></div>
+      <p id="stage2" class="mono" style="font-size:13px"></p>
+    </div>
     <p class="note">ドラッグで回す・ピンチで拡大。横 ±45°、縦 ±25° まで自然に見えます。</p>
     <div id="stats"></div>
     <div class="row" style="margin-top:10px">
