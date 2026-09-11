@@ -34,7 +34,9 @@ describe('開けない写真を、生成を始める前に見つける', () => {
     ];
 
     await expect(ensureDecodable(photos)).rejects.toThrow(/右向き（right\.heic）/);
+    // 原因は決めつけない。ここで落ちても資源不足のことがある（PR #7 の指摘）。
     await expect(ensureDecodable(photos)).rejects.toThrow(/HEIC/);
+    await expect(ensureDecodable(photos)).rejects.toThrow(/資源/);
   });
 
   it('開けた bitmap は必ず閉じる（確認そのものが資源を食い潰さないため）', async () => {
@@ -61,7 +63,7 @@ describe('開けない写真を、生成を始める前に見つける', () => {
 });
 
 describe('途中で落ちたときの言い方', () => {
-  it('復号の失敗は「写真が壊れている」ではなく資源不足として言う', () => {
+  it('一度開けた写真が後から開けなくなったら、資源のほうを疑う', () => {
     const e = new DOMException('The source image could not be decoded.', 'InvalidStateError');
     const msg = explainFailure(e);
     // ここへ来る時点で ensureDecodable は通っている。ファイルのせいにしない。
