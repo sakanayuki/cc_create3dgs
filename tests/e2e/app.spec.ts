@@ -76,13 +76,25 @@ test.describe('本体アプリ', () => {
     await expect(page.locator('#stage')).not.toHaveText('準備しています', { timeout: 60_000 });
 
     // 成功して見る画面に行くか、理由を出して止まるか。必ずどちらか。
+    //
+    // **待つ時間は 8 分。** ここは速度を測る検査ではない（playwright.config.ts の
+    // 冒頭のとおり、E2E は結果の正しさだけを見る）。それなのに 5 分で切っていたため、
+    // ランナーの速さのぶれで落ちるようになっていた。CI ではモデルを HuggingFace から
+    // 約 46MB 落とし、そのうえで SwiftShader の WASM で推論する。実測 4.3 分の回が
+    // あり、余裕がほとんど無かった（2026-09-11 に main で 5.0 分に届いて落ちた）。
+    //
+    // **落ちたときは、どこで止まったかを書く。** 前回は「成功も失敗もしていません」
+    // としか出ず、モデルの取得で止まったのか推論で止まったのか分からなかった。
     const done = page.locator('#view');
     const failed = page.locator('#workError');
     await expect(async () => {
       const ok = await done.isVisible();
       const ng = await failed.isVisible();
-      expect(ok || ng, '生成画面のまま、成功も失敗もしていません').toBe(true);
-    }).toPass({ timeout: 5 * 60 * 1000, intervals: [2000] });
+      const stage = (await page.locator('#stage').textContent().catch(() => '')) ?? '';
+      expect(ok || ng, `生成画面のまま、成功も失敗もしていません（いま: ${stage.trim()}）`).toBe(
+        true,
+      );
+    }).toPass({ timeout: 8 * 60 * 1000, intervals: [2000] });
 
     if (await failed.isVisible()) {
       // 失敗するなら、何が起きたかを必ず書く。空のカードは出さない。

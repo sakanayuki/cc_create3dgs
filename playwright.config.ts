@@ -18,7 +18,9 @@ export default defineConfig({
   outputDir: './tests/results/playwright',
   fullyParallel: false,
   workers: 1,
-  timeout: 10 * 60 * 1000, // ソフトウェア実装は実機の20〜50倍遅いので長めに取る
+  // ソフトウェア実装は実機の20〜50倍遅いので長めに取る。
+  // app.spec.ts は中で 8 分待つので、取り込みの時間ぶん余裕を足して 12 分にする。
+  timeout: 12 * 60 * 1000,
   reporter: [['list'], ['json', { outputFile: 'tests/results/e2e.json' }]],
   use: {
     baseURL: 'http://127.0.0.1:4173',
