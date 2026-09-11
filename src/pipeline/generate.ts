@@ -455,14 +455,29 @@ async function inferFaceLandmarks(
  * 使うと、どちらが先に効くかがブラウザ間で揃わない。
  *
  * 失敗しても生成は止めない。null を返せばグリッド経由に落ちる。
+ *
+ * ## 使い終わったら必ず `close()` する
+ *
+ * ここが抱える `ImageBitmap` は**元写真の全画素**である。1200 万画素の
+ * 写真なら 48 MB。`close()` を呼ばずに捨てると、GC が回るまで解放されない。
+ * 1枚モードでは 1 回きりなので表に出なかったが、複数枚モードは view の数だけ
+ * 作るので積み上がる。実機で「1枚目のプレビューは出たのに2枚目で
+ * `InvalidStateError: The source image could not be decoded.`」という報告を
+ * 受けた。復号の失敗は資源の枯渇でも起きる。
  */
-function nativeFacePatchSource(photo: Blob, lb: Letterbox): FacePatchSource | null {
+interface FacePatchProvider {
+  readonly crop: FacePatchSource;
+  /** 抱えている元写真の `ImageBitmap` を解放する。何度呼んでもよい。 */
+  close(): void;
+}
+
+function nativeFacePatchSource(photo: Blob, lb: Letterbox): FacePatchProvider | null {
   if (lb.scale >= 1) return null;
   if (typeof createImageBitmap !== 'function' || typeof OffscreenCanvas === 'undefined') return null;
 
   let bitmap: ImageBitmap | null = null;
   let failed = false;
-  return async (box: Rect, size: number): Promise<Uint8ClampedArray | null> => {
+  const crop = async (box: Rect, size: number): Promise<Uint8ClampedArray | null> => {
     if (failed) return null;
     try {
       if (!bitmap) bitmap = await createImageBitmap(photo, { imageOrientation: 'from-image' });
@@ -480,6 +495,14 @@ function nativeFacePatchSource(photo: Blob, lb: Letterbox): FacePatchSource | nu
       failed = true;
       return null;
     }
+  };
+  return {
+    crop,
+    close: () => {
+      bitmap?.close();
+      bitmap = null;
+      failed = true;
+    },
   };
 }
 
@@ -968,21 +991,29 @@ export async function generate(photo: Blob, options: GenerateOptions): Promise<G
   let headYawDeg: number | null = null;
   if (opts.mode === 'person' && depthOut.kind === 'depth') {
     report(0.58, '顔の立体を起こしています');
-    const withFace = await mark('顔の起伏', () =>
-      applyFaceDepth(
-        depthRaw,
-        rgba,
-        alpha,
-        grid,
-        focalPx,
-        opts.backend,
-        shaderF16,
-        nativeFacePatchSource(photo, prepared.box),
-      ),
-    );
-    depthRaw = withFace.depth;
-    faceApplied = withFace.applied;
-    headYawDeg = withFace.headYawDeg;
+    // **元写真ぶんの ImageBitmap を抱えるので、終わったら必ず手放す。**
+    // 複数枚モードでは view の数だけ積み上がり、次の view の復号が
+    // 資源不足で落ちる（docs/12 §12.16.4）。
+    const patch = nativeFacePatchSource(photo, prepared.box);
+    try {
+      const withFace = await mark('顔の起伏', () =>
+        applyFaceDepth(
+          depthRaw,
+          rgba,
+          alpha,
+          grid,
+          focalPx,
+          opts.backend,
+          shaderF16,
+          patch ? patch.crop : null,
+        ),
+      );
+      depthRaw = withFace.depth;
+      faceApplied = withFace.applied;
+      headYawDeg = withFace.headYawDeg;
+    } finally {
+      patch?.close();
+    }
   }
 
   report(0.62, '奥行きを整えています');

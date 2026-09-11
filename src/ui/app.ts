@@ -319,7 +319,8 @@ function pickedPhotos(): MultiPhoto[] {
   const out: MultiPhoto[] = [];
   for (const { slot, id } of MULTI_SLOTS) {
     const f = $<HTMLInputElement>(id).files?.[0];
-    if (f) out.push({ slot, blob: f });
+    // 名前も渡す。失敗したときに「どの写真か」を言えるようにする。
+    if (f) out.push({ slot, blob: f, name: f.name });
   }
   return out;
 }

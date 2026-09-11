@@ -34,6 +34,8 @@ import type { Backend } from '../runtime/OrtSession';
 export interface MultiPhoto {
   readonly slot: ViewSlot;
   readonly blob: Blob;
+  /** 元のファイル名。失敗したときにどの写真かを言うためだけに使う。 */
+  readonly name?: string;
 }
 
 export interface GenerateMultiOptions {
@@ -60,6 +62,26 @@ export interface GenerateMultiOptions {
  * 理由を日本語で伝える」と決めている。
  */
 const MIN_INSIDE_RATIO = 0.95;
+
+/**
+ * 例外を利用者に読める一文にする。
+ *
+ * 復号の失敗だけは特別扱いする。ここへ来る時点で `ensureDecodable` は通って
+ * いて、**その写真は一度開けている**。同じ写真が後から開けなくなったのだから、
+ * 形式ではなく資源のほうを疑う。ここで「写真が壊れています」と言うのは
+ * 明確に誤りである。
+ */
+export function explainFailure(e: unknown): string {
+  const name = e instanceof Error ? e.name : '';
+  if (name === 'InvalidStateError' || /could not be decoded/i.test(String(e))) {
+    return (
+      '写真を復号できませんでした。最初に開けることは確認済みなので、' +
+      '端末の資源（メモリ）が足りなくなった可能性が高いです。' +
+      '枚数を2枚に減らすか、画素数の小さい写真で試してください。'
+    );
+  }
+  return String(e);
+}
 
 const SLOT_LABEL: Record<ViewSlot, string> = {
   front: '正面',
@@ -142,11 +164,57 @@ function toAlignView(slot: ViewSlot, r: GenerateResult, grid: number): AlignView
 /** 位置合わせに使わない領域を作る（いまは使っていない。§12.15.5 の記録）。 */
 export { torsoAndHead };
 
+/** 失敗したときに「どの写真か」を言うための呼び名。 */
+function photoLabel(photo: MultiPhoto): string {
+  return photo.name ? `${SLOT_LABEL[photo.slot]}（${photo.name}）` : SLOT_LABEL[photo.slot];
+}
+
+/**
+ * 生成を始める前に、**全部の写真が本当に開けるか**を確かめる（docs/12 §12.16.4）。
+ *
+ * 開けない写真が2枚目にあると、1枚目に数十秒かけたあとで
+ * `InvalidStateError: The source image could not be decoded.` だけが出る。
+ * 利用者にはどの写真が悪いのか分からないし、かけた時間も無駄になる。
+ * **ここの値打ちは「どの写真か」を早く言えること**で、そこは確実に効く。
+ *
+ * **原因までは決めつけない。** ここで落ちたからといって形式のせいとは限らない。
+ * 同じタブで前に生成していれば、モデルのセッションや GPU の資源が残ったままで、
+ * 1枚目を開く時点でもう足りないことがありうる。`createImageBitmap` は
+ * 資源不足でも同じ例外を投げるので、**投げられた場所から原因は読めない**
+ * （PR #7 の Codex の指摘。docs/12 §12.16.4）。だから両方を挙げる。
+ *
+ * 開いた `ImageBitmap` はすぐ閉じる。抱えたままにすると、ここでの確認が
+ * そのまま資源の枯渇を招く。
+ */
+export async function ensureDecodable(photos: readonly MultiPhoto[]): Promise<void> {
+  if (typeof createImageBitmap !== 'function') return;
+  for (const photo of photos) {
+    let bitmap: ImageBitmap | null = null;
+    try {
+      bitmap = await createImageBitmap(photo.blob);
+    } catch (cause) {
+      throw new Error(
+        `${photoLabel(photo)}の写真を開けませんでした。` +
+          `このブラウザが扱えない形式（HEIC など）か、端末の資源（メモリ）が` +
+          `足りないかのどちらかです。JPEG か PNG で保存し直すか、` +
+          `画素数の小さい写真で試してください。` +
+          `続けて何度も生成しているなら、ページを開き直すと直ることがあります。`,
+        { cause },
+      );
+    } finally {
+      bitmap?.close();
+    }
+  }
+}
+
 export async function generateMulti(
   photos: readonly MultiPhoto[],
   options: GenerateMultiOptions,
 ): Promise<GenerateMultiResult> {
   if (photos.length < 2) throw new Error('複数枚モードには2枚以上が要ります');
+
+  // 1枚目に時間をかける前に、全部開けることを確かめる。
+  await ensureDecodable(photos);
 
   const grid = options.grid;
   const report = (f: number, label: string): void => options.onProgress?.(f, label);
@@ -180,7 +248,16 @@ export async function generateMulti(
       ...(i === 0 && options.onPreview ? { onPreview: options.onPreview } : {}),
     };
     const t0 = performance.now();
-    const result = await generate(photo.blob, opts);
+    // どの view で落ちたかを必ず言う。生の例外だけだと、3枚のうちどれの
+    // 話なのかが利用者にも開発者にも分からない（docs/12 §12.16.4）。
+    let result: GenerateResult;
+    try {
+      result = await generate(photo.blob, opts);
+    } catch (cause) {
+      throw new Error(`${i + 1}枚目・${photoLabel(photo)}で失敗しました: ${explainFailure(cause)}`, {
+        cause,
+      });
+    }
     // どこまで進んだかを残す。画面が固まって見えたときに、どの view で
     // 止まったのかが分からないと追えない。
     console.info(
