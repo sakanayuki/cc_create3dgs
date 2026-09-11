@@ -30,6 +30,16 @@ function body(slot: ViewSlot, subjectYaw: number): AlignView {
   return { slot, width: W, height: H, camera: CAM, alpha: r.alpha, depth: r.depth };
 }
 
+/** 幅と奥行きの比だけを変えた体。比を変えないと剛体で合ってしまう。 */
+function reshaped(slot: ViewSlot, subjectYaw: number, kx: number, kz: number): AlignView {
+  const shape = {
+    ...DEFAULT_BODY,
+    parts: DEFAULT_BODY.parts.map((p) => ({ ...p, rx: p.rx * kx, rz: p.rz * kz })),
+  };
+  const r = renderBody(shape, CAM, W, H, subjectYaw);
+  return { slot, width: W, height: H, camera: CAM, alpha: r.alpha, depth: r.depth };
+}
+
 /**
  * **別人**。縦の長さは揃えたまま、幅と奥行きの比だけを変える。
  *
@@ -204,6 +214,33 @@ describe('合わない写真を外して、残りで作る', () => {
     expect(registrationGate(r.registration).ok).toBe(true);
     // 外したことを進捗に出している（画面が黙って減るのを避ける）
     expect(steps).toEqual([2]);
+  }, 180000);
+
+  /**
+   * **最下位が基準なら、1枚も外さずに降りる**（PR #8 の Codex の指摘 P1）。
+   *
+   * 横2枚が「同じ別人」だと互いに整合するので、ずれて見えるのは基準のほうに
+   * なる。ここで非基準を1枚外すと、残るのは「基準 ＋ もう1枚のずれた view」。
+   * しかも2枚になると合格ラインが 0.85 に緩むので、**そのまま通って壊れた
+   * 立体が出る**。ゲートが止めるはずのものを、ゲートの手前で作ってしまう。
+   *
+   * docs/12 §12.16.5 にこの降伏を書いておきながら、コードに書いていなかった。
+   */
+  it('最下位が基準なら、1枚も外さずに降りる', () => {
+    // 実測でこの形（幅 2.5 倍・奥行き 0.4 倍）にすると
+    // front 0.809 / right 0.904 / left 0.905 になり、基準が最下位で
+    // かつ 3枚の合格ライン 0.90 を割る。
+    const r = solveWithDrops(
+      [body('front', 0), reshaped('right', RIGHT, 2.5, 0.4), reshaped('left', LEFT, 2.5, 0.4)],
+      undefined,
+    );
+
+    const gate = registrationGate(r.registration);
+    expect(gate.ok).toBe(false);
+    expect(gate.worst.slot).toBe('front'); // 最下位は基準
+    // **外していない。** 外すと2枚の緩い線（0.85）で通ってしまう。
+    expect(r.dropped).toEqual([]);
+    expect(r.keep).toEqual([0, 1, 2]);
   }, 180000);
 
   it('2枚しか無いなら外さない（基準は外せないので、残るのは1枚になってしまう）', () => {

@@ -188,7 +188,8 @@ export function droppedMessage(dropped: readonly ViewSlot[], kept: readonly View
  *
  * ただし**ずれた view が2枚あって互いに整合している**ときは、基準のほうが
  * 最下位に出る（尺度を揃えて2枚ずらすと基準が 0.874 で最下位になった）。
- * そのときは外す先が無いので、諦めて基準1枚に戻る。これは正しい降伏である。
+ * そのときは**1枚も外さずに降りる**。外すと「基準 ＋ もう1枚のずれた view」が
+ * 残り、2枚の緩い合格ライン（0.85）で通ってしまう。
  *
  * 再合わせは `registerViews` をやり直す。残った組で解き直さないと、
  * 外した view に引っ張られた姿勢がそのまま残る。
@@ -209,6 +210,28 @@ export function solveWithDrops(
 
   while (!registrationGate(registration).ok && keep.length > 2) {
     const refIndex = registration.referenceIndex;
+
+    // **最下位が基準なら、外してはいけない。**
+    //
+    // ずれた view が2枚あって互いに整合していると、基準のほうが最下位に出る
+    // （尺度を揃えて2枚ずらすと基準が 0.874 で最下位になった）。このとき
+    // 非基準を1枚外すと、残るのは「基準 ＋ もう1枚のずれた view」になる。
+    // しかも2枚になると合格ラインが 0.85 に緩むので、**そのまま通って
+    // 壊れた立体が出る。** ゲートが止めるはずのものを、ゲートの手前で
+    // 作ってしまう（PR #8 の Codex の指摘 P1）。
+    //
+    // docs/12 §12.16.5 に「そのときは外す先が無いので基準1枚に降伏する」と
+    // 書いておきながら、コードに書いていなかった。ここで降りる。
+    let worstAll = -1;
+    let worstAllRatio = Infinity;
+    registration.views.forEach((v, i) => {
+      if (v.insideRatio < worstAllRatio) {
+        worstAllRatio = v.insideRatio;
+        worstAll = i;
+      }
+    });
+    if (worstAll === refIndex) break;
+
     let worst = -1;
     let worstRatio = Infinity;
     registration.views.forEach((v, i) => {
