@@ -580,19 +580,26 @@ function withinBounds(pose: ViewPose, initialScale: number): boolean {
 }
 
 /**
- * 3枚（または2枚）の位置合わせを解く。
+ * 合わせと測りに要る道具を一度に作る。
  *
- * 基準は `slot === 'front'` の view。無ければシルエットの面積が最大の view
- * （docs/12 §12.7「2枚のとき」）。基準の姿勢は動かさない。
+ * `registerViews` と `measureAtPoses` の両方が使う。**別々に組み立てては
+ * いけない。** 回転の中心（`frames`）は合わせに使う点の重心から決まるので、
+ * ここがずれると同じ姿勢でも別の数字が出て、測った値を突き合わせられない。
  */
-export function registerViews(views: readonly AlignView[], options: RegisterOptions = {}): RegisterResult {
-  if (views.length < 2) throw new Error('位置合わせには2枚以上が要ります');
+interface AlignContext {
+  readonly grids: readonly SilhouetteGrid[];
+  readonly measureGrids: readonly SilhouetteGrid[];
+  readonly points: readonly ViewPoints[];
+  readonly measurePoints: readonly ViewPoints[];
+  readonly cams: readonly CameraIntrinsics[];
+  readonly referenceIndex: number;
+  readonly frames: readonly PoseFrame[];
+  readonly scratch: Scratch;
+}
 
+function prepareAlign(views: readonly AlignView[], options: RegisterOptions): AlignContext {
   const gridLongSide = options.gridLongSide ?? 128;
   const samples = options.samplesPerView ?? 3000;
-  const yawRange = options.yawSearchRange ?? (40 * Math.PI) / 180;
-  const yawStep = options.yawSearchStep ?? (2 * Math.PI) / 180;
-  const maxRounds = options.maxRounds ?? 60;
 
   // **合わせるときは、点もマスクも「胴と頭」で揃える。**
   // 胴だけの点を全身のマスクと比べると、収まりは甘くなり、縦の広がりは
@@ -634,6 +641,90 @@ export function registerViews(views: readonly AlignView[], options: RegisterOpti
     referenceIndex = Math.max(0, best);
   }
 
+  // 回転の中心。その view の重心を、基準 view の重心へ運ぶ（rigid.ts 冒頭）。
+  const refCentroid = (points[referenceIndex] as ViewPoints).centroid;
+  const frames: PoseFrame[] = points.map((p, i) =>
+    i === referenceIndex ? IDENTITY_FRAME : { source: p.centroid, target: refCentroid },
+  );
+
+  const maxCells = Math.max(
+    ...grids.map((g) => g.width * g.height),
+    ...measureGrids.map((g) => g.width * g.height),
+  );
+  return {
+    grids,
+    measureGrids,
+    points,
+    measurePoints,
+    cams,
+    referenceIndex,
+    frames,
+    scratch: makeScratch(maxCells),
+  };
+}
+
+/** `measureAtPoses` が返す、view 1つぶんの測定値。 */
+export interface ViewMeasure {
+  readonly slot: ViewSlot;
+  readonly containmentPx: number;
+  readonly insideRatio: number;
+  readonly iou: number;
+}
+
+/**
+ * **与えた姿勢**での収まりを測る（調査用）。
+ *
+ * `registerViews` が解いた姿勢だけでなく、**わざと間違えた姿勢**でも測れる。
+ * 合格ラインを決めるには「正しく合ったときの値」だけでは足りない。
+ * 間違ったときにどこまで悪くなるかを知らないと、線を引く場所が決まらない。
+ * 0.95 という閾値は前者だけを見て置いてしまい、実素材の正解（0.949）を
+ * 落とした（docs/12 §12.16.5）。
+ *
+ * 毎回グリッドと点を作り直すので遅い。生成の経路からは呼ばない。
+ */
+export function measureAtPoses(
+  views: readonly AlignView[],
+  poses: readonly ViewPose[],
+  options: RegisterOptions = {},
+): readonly ViewMeasure[] {
+  const ctx = prepareAlign(views, options);
+  const mats = poses.map((p) => rotationMatrix(p));
+  return views.map((v, j) => {
+    const c = measureContainment(
+      ctx.measurePoints,
+      ctx.measureGrids,
+      ctx.cams,
+      poses,
+      mats,
+      ctx.frames,
+      ctx.scratch,
+      j,
+    );
+    return {
+      slot: v.slot,
+      containmentPx: c.meanSpill,
+      insideRatio: c.insideRatio,
+      iou: measureIou(ctx.measurePoints, ctx.measureGrids, ctx.cams, poses, mats, ctx.frames, ctx.scratch, j),
+    };
+  });
+}
+
+/**
+ * 3枚（または2枚）の位置合わせを解く。
+ *
+ * 基準は `slot === 'front'` の view。無ければシルエットの面積が最大の view
+ * （docs/12 §12.7「2枚のとき」）。基準の姿勢は動かさない。
+ */
+export function registerViews(views: readonly AlignView[], options: RegisterOptions = {}): RegisterResult {
+  if (views.length < 2) throw new Error('位置合わせには2枚以上が要ります');
+
+  const yawRange = options.yawSearchRange ?? (40 * Math.PI) / 180;
+  const yawStep = options.yawSearchStep ?? (2 * Math.PI) / 180;
+  const maxRounds = options.maxRounds ?? 60;
+
+  const ctx = prepareAlign(views, options);
+  const { grids, measureGrids, points, measurePoints, cams, referenceIndex, frames, scratch } = ctx;
+
   // 初期姿勢。yaw は枠から、尺度はヨー不変の縦の長さから決める（docs/12 §12.7）。
   const refSpan = (points[referenceIndex] as ViewPoints).verticalSpan;
   const poses: ViewPose[] = views.map((v, i) => {
@@ -644,15 +735,6 @@ export function registerViews(views: readonly AlignView[], options: RegisterOpti
   });
   const mats = poses.map((p) => rotationMatrix(p));
   const initialScale = poses.map((p) => p.scale);
-
-  // 回転の中心。その view の重心を、基準 view の重心へ運ぶ（rigid.ts 冒頭）。
-  const refCentroid = (points[referenceIndex] as ViewPoints).centroid;
-  const frames: PoseFrame[] = points.map((p, i) =>
-    i === referenceIndex ? IDENTITY_FRAME : { source: p.centroid, target: refCentroid },
-  );
-
-  const maxCells = Math.max(...grids.map((g) => g.width * g.height), ...measureGrids.map((g) => g.width * g.height));
-  const scratch = makeScratch(maxCells);
 
   const cost = (): number =>
     evaluate(points, grids, cams, poses, mats, frames, referenceIndex, scratch).total;
@@ -752,19 +834,21 @@ export function registerViews(views: readonly AlignView[], options: RegisterOpti
   const parts = evaluate(points, grids, cams, poses, mats, frames, referenceIndex, scratch);
   // 測るときは被写体全体の点を使う（上のコメント）。重心（frames）は合わせに
   // 使った点のものをそのまま使う。姿勢はそれを前提に解いてあるため。
-  const results: ViewResult[] = views.map((v, j) => ({
-    slot: v.slot,
-    pose: poses[j] as ViewPose,
-    slotFlipped: flipped[j] === true,
-    frame: frames[j] as PoseFrame,
-    headYawDisagrees:
-      v.headYawDeg !== undefined && isFlipped(expectedYaw[j] as number, (v.headYawDeg * Math.PI) / 180),
-    containmentPx: measureContainment(measurePoints, measureGrids, cams, poses, mats, frames, scratch, j)
-      .meanSpill,
-    insideRatio: measureContainment(measurePoints, measureGrids, cams, poses, mats, frames, scratch, j)
-      .insideRatio,
-    iou: measureIou(measurePoints, measureGrids, cams, poses, mats, frames, scratch, j),
-  }));
+  const results: ViewResult[] = views.map((v, j) => {
+    // 収まりは1回だけ測る。meanSpill と insideRatio は同じ走査から出る。
+    const c = measureContainment(measurePoints, measureGrids, cams, poses, mats, frames, scratch, j);
+    return {
+      slot: v.slot,
+      pose: poses[j] as ViewPose,
+      slotFlipped: flipped[j] === true,
+      frame: frames[j] as PoseFrame,
+      headYawDisagrees:
+        v.headYawDeg !== undefined && isFlipped(expectedYaw[j] as number, (v.headYawDeg * Math.PI) / 180),
+      containmentPx: c.meanSpill,
+      insideRatio: c.insideRatio,
+      iou: measureIou(measurePoints, measureGrids, cams, poses, mats, frames, scratch, j),
+    };
+  });
 
   return {
     views: results,

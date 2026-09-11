@@ -411,7 +411,7 @@ function multiStatsHtml(r: GenerateMultiResult): string {
       .map((v) => `${SLOT_LABEL[v.slot].padEnd(4, '　')} 一致度 ${(v.insideRatio * 100).toFixed(1)}%`)
       .join('\n');
     return `<div class="card warn" style="margin:0">
-         <h3>3枚を合わせられませんでした</h3>
+         <h3>写真どうしを合わせられませんでした</h3>
          <p>${esc(r.fallbackReason ?? '')}</p>
        </div>
        <details><summary>view ごとの一致度</summary><pre class="mono">${esc(rows)}</pre></details>`;
@@ -422,6 +422,7 @@ function multiStatsHtml(r: GenerateMultiResult): string {
     0,
   );
   const flipped = r.registration.views.filter((v) => v.slotFlipped).map((v) => SLOT_LABEL[v.slot]);
+  const usedCount = r.registration.views.length;
   const rows = r.registration.views
     .map(
       (v, i) =>
@@ -433,18 +434,32 @@ function multiStatsHtml(r: GenerateMultiResult): string {
 
   return `<div class="grid">
        <div class="stat"><span class="k">ガウシアン</span><span class="v">${r.build.count.toLocaleString('ja-JP')}</span></div>
-       <div class="stat"><span class="k">使った写真</span><span class="v">${r.views.length} 枚</span></div>
+       <div class="stat"><span class="k">使った写真</span><span class="v">${usedCount} 枚${
+         r.droppedSlots.length > 0 ? `<span class="k">（${r.views.length} 枚中）</span>` : ''
+       }</span></div>
        <div class="stat"><span class="k">合わせの残差（最小）</span><span class="v">${(r.registration.worstInsideRatio * 100).toFixed(1)}%</span></div>
+       ${
+         r.mergeStats
+           ? `<div class="stat"><span class="k">重なりを落とした</span><span class="v">${r.mergeStats.dropped.toLocaleString('ja-JP')}<span class="k"> / ${r.mergeStats.before.toLocaleString('ja-JP')}</span></span></div>`
+           : ''
+       }
        <div class="stat"><span class="k">生成時間</span><span class="v">${(totalMs / 1000).toFixed(1)} s</span></div>
      </div>
+     ${
+       // 外した写真があるなら、合成できていても黙ってはいけない。
+       // 「3枚入れたのに2枚ぶんの立体」を、理由なしに渡さない（docs/12 §12.16.5）。
+       r.droppedSlots.length > 0
+         ? `<div class="card warn" style="margin:10px 0"><p style="margin:0">${esc(r.fallbackReason ?? '')}</p></div>`
+         : ''
+     }
      ${
        flipped.length > 0
          ? `<p class="note"><strong>枠を読み替えました: ${esc(flipped.join('、'))}。</strong>入れた写真の向きが枠と逆だったので、顔の向きから判断して直しました。</p>`
          : ''
      }
      <p class="note">
-       <strong>重複除去と色合わせはまだ入っていません（docs/12 §12.8, §12.9）。</strong>
-       両方の写真から見えている面は二重に置かれ、写真ごとの露出差は継ぎ目の色差として出ます。
+       <strong>色合わせはまだ入っていません（docs/12 §12.9）。</strong>
+       写真ごとの露出差が継ぎ目の色差として出ることがあります。
      </p>
      <details><summary>view ごとの位置合わせ</summary><pre class="mono">${esc(rows)}</pre></details>`;
 }
