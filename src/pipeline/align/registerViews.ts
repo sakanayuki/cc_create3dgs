@@ -133,6 +133,14 @@ export interface ViewResult {
   readonly slotFlipped: boolean;
   /** 顔から測ったヨーの符号が、枠と食い違っていた（`headYawDeg` を渡したときだけ）。 */
   readonly headYawDisagrees: boolean;
+  /**
+   * 回転の中心（rigid.ts の `PoseFrame`）。
+   *
+   * **姿勢と対で使わないと意味がない。** 呼び出し側が重心を計算し直すと、
+   * ここは間引いた点で求めているので微妙にずれ、姿勢は正しいのに位置だけ
+   * 食い違う。返して、そのまま使ってもらう。
+   */
+  readonly frame: PoseFrame;
 }
 
 export interface RegisterResult {
@@ -748,6 +756,7 @@ export function registerViews(views: readonly AlignView[], options: RegisterOpti
     slot: v.slot,
     pose: poses[j] as ViewPose,
     slotFlipped: flipped[j] === true,
+    frame: frames[j] as PoseFrame,
     headYawDisagrees:
       v.headYawDeg !== undefined && isFlipped(expectedYaw[j] as number, (v.headYawDeg * Math.PI) / 180),
     containmentPx: measureContainment(measurePoints, measureGrids, cams, poses, mats, frames, scratch, j)

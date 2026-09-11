@@ -114,6 +114,13 @@ export interface GenerateResult {
    */
   readonly metricFix: number;
   readonly box: Letterbox;
+  /**
+   * 深度の正規化に使った範囲。`planes.depth`（0..1）を実距離へ戻すのに要る。
+   * 複数枚モードの位置合わせが使う（src/pipeline/generateMulti.ts）。
+   */
+  readonly depthRange: { readonly nearZ: number; readonly farZ: number };
+  /** 顔から測った頭のヨー[度]。符号だけ使う（docs/12 §12.15.6）。 */
+  readonly headYawDeg: number | null;
   /** 作業グリッド上の各プレーン。書き出し（.pgs）で使う。 */
   readonly planes: {
     readonly color: Uint8ClampedArray;
@@ -499,9 +506,9 @@ async function applyFaceDepth(
   backend: Backend,
   shaderF16: boolean,
   nativePatch: FacePatchSource | null = null,
-): Promise<{ depth: Float32Array; applied: boolean }> {
+): Promise<{ depth: Float32Array; applied: boolean; headYawDeg: number | null }> {
   const seed = headBoxFromMatte(alpha, grid, grid);
-  if (!seed) return { depth, applied: false };
+  if (!seed) return { depth, applied: false, headYawDeg: null };
 
   let session: ort.InferenceSession;
   try {
@@ -512,7 +519,7 @@ async function applyFaceDepth(
       shaderF16,
     );
   } catch {
-    return { depth, applied: false };
+    return { depth, applied: false, headYawDeg: null };
   }
 
   try {
@@ -533,17 +540,42 @@ async function applyFaceDepth(
       }
       box = next;
     }
-    if (!best || best.score < FACE_MIN_SCORE) return { depth, applied: false };
+    // 頭のヨー。**大きさは当てにしない、符号だけ使う。**
+    // 実測では ±90° の写真で 39〜49° しか出ず、モデル自身の確からしさも負だった
+    // （横向きは学習の外）。それでも符号は3枚とも正しく、複数枚モードで
+    // 「枠の入れ違い」を見つけるのに足りる（docs/12 §12.15.5、§12.15.6）。
+    const headYawDeg = best ? headYawFromLandmarks(best.points) : null;
+
+    if (!best || best.score < FACE_MIN_SCORE) return { depth, applied: false, headYawDeg };
 
     const surface = faceDepthSurface(best.points, best.box);
-    if (surface.covered < FACE_MIN_PIXELS) return { depth, applied: false };
+    if (surface.covered < FACE_MIN_PIXELS) return { depth, applied: false, headYawDeg };
     return {
       depth: applyFaceRelief(depth, surface, best.box, grid, grid, focalPx),
       applied: true,
+      headYawDeg,
     };
   } catch {
-    return { depth, applied: false };
+    return { depth, applied: false, headYawDeg: null };
   }
+}
+
+/**
+ * 顔の landmark から頭のヨー[度]を出す（docs/12 §12.15.5）。
+ *
+ * 234 が被写体の右、454 が左の端。x/y/z は同じ尺度で、z は小さいほど手前。
+ * 左右を結ぶベクトルを x–z 平面で見ると、そのまま頭の向きになる。
+ *
+ *   正面を向く … +x（画像の右）→ 0
+ *   画面の右を向く … +z（奥）→ +90°
+ *
+ * 符号の約束は `src/pipeline/align/rigid.ts` の `ViewPose.yaw` と同じ。
+ */
+function headYawFromLandmarks(points: readonly FaceLandmark[]): number | null {
+  const right = points[234];
+  const left = points[454];
+  if (!right || !left) return null;
+  return (Math.atan2(left.z - right.z, left.x - right.x) * 180) / Math.PI;
 }
 
 export interface DepthOutput {
@@ -933,6 +965,7 @@ export async function generate(photo: Blob, options: GenerateOptions): Promise<G
   // 顔の起伏。深度モデルは顔をほぼ平らな楕円として返すので、顔専用の
   // landmark モデルで細部の帯だけを差し替える（docs/09 §V9）。
   let faceApplied = false;
+  let headYawDeg: number | null = null;
   if (opts.mode === 'person' && depthOut.kind === 'depth') {
     report(0.58, '顔の立体を起こしています');
     const withFace = await mark('顔の起伏', () =>
@@ -949,6 +982,7 @@ export async function generate(photo: Blob, options: GenerateOptions): Promise<G
     );
     depthRaw = withFace.depth;
     faceApplied = withFace.applied;
+    headYawDeg = withFace.headYawDeg;
   }
 
   report(0.62, '奥行きを整えています');
@@ -1111,6 +1145,8 @@ export async function generate(photo: Blob, options: GenerateOptions): Promise<G
     build,
     metricFix,
     box: prepared.box,
+    depthRange: { nearZ: calibrated.nearZ, farZ: calibrated.farZ },
+    headYawDeg,
     planes: { color: rgba, alpha, depth: depth01 },
     stats: {
       focalPx,

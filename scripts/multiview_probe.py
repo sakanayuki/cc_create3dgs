@@ -11,6 +11,7 @@ onnxruntime で回し、**位置合わせの入力だけ**を書き出す。
     <out>/<slot>.json       … 幅・高さ・焦点距離・主点
     <out>/<slot>.alpha.u8   … α（uint8, grid×grid）
     <out>/<slot>.raw.f32    … 深度モデルの**生出力**（float32, grid×grid）
+    <out>/<slot>.color.rgba8 … 色（uint8 RGBA, grid×grid×4）
 
 これを `scripts/align_probe.ts` が読んで位置合わせを回す。
 
@@ -263,8 +264,13 @@ def main() -> int:
         # 変わってしまう。位置合わせに渡す深度は align_probe.ts が作る。
         face = head_yaw(face_sess, img, alpha)
 
+        # 色は RGBA8。スプラットの色はここから採る（docs/11 §11.6 S4）。
+        rgb = np.asarray(img, dtype=np.uint8)
+        rgba_plane = np.dstack([rgb, np.full(rgb.shape[:2], 255, dtype=np.uint8)])
+
         (args.out / f"{slot}.alpha.u8").write_bytes(alpha.astype(np.uint8).tobytes())
         (args.out / f"{slot}.raw.f32").write_bytes(depth.tobytes())
+        (args.out / f"{slot}.color.rgba8").write_bytes(rgba_plane.tobytes())
         meta = {
             "slot": slot,
             "source": str(path),
