@@ -48,3 +48,24 @@ test('2枚そろうまでボタンは押せない', async ({ page }) => {
   await page.locator('#photo-left').setInputFiles(`${process.cwd()}/tests/test29_left.jpeg`);
   await expect(go).toHaveText(/3枚から作る/);
 });
+
+/**
+ * 「できました」の画面にも進捗を置く（docs/12 §12.16.3）。
+ *
+ * 1枚目の下書きを見せた時点で画面は `#view` へ移る。進捗バーが `#work` にしか
+ * 無かったので、残り2枚の生成と位置合わせのあいだ**進捗がどこにも出なかった**。
+ * 実機で「正面写真の出力までで完了してしまった」と報告された。
+ *
+ * ここで生成は走らせない（モデルの取得が要る）。**置き場所があること**だけを見る。
+ */
+test('「できました」の画面にも進捗の置き場所がある', async ({ page }) => {
+  await page.goto('/');
+
+  // #work の中ではなく #view の中にあること。ここが要点。
+  await expect(page.locator('#view #viewProgress')).toHaveCount(1);
+  await expect(page.locator('#view #viewProgress .bar#bar2')).toHaveCount(1);
+  await expect(page.locator('#view #stage2')).toHaveCount(1);
+
+  // 走っていないあいだは畳んである。
+  await expect(page.locator('#viewProgress')).toBeHidden();
+});
