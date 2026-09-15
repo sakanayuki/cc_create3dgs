@@ -60,6 +60,19 @@ async function makePhoto(): Promise<{ name: string; mimeType: string; buffer: Bu
 
 test.describe('本体アプリ', () => {
   test('写真を選ぶと生成画面に移り、必ず結果か理由に行き着く', async ({ page }) => {
+    // **この検査は二段で待つ。** 持ち時間は両方を足して取らないといけない。
+    //
+    //   支度（#env 30s → #work 15s → #stage 60s）   最大 約 1.8 分
+    //   ① 結果か理由に行き着くまで                    最大 8 分
+    //   ② 仕上げが終わって統計が埋まるまで             最大 10 分
+    //                                             合計 約 20 分
+    //
+    // ①だけを見て全体を 12 分にしたら、①が長引いたぶん②が削られて、
+    // 結局ランナーの速さで落ちる形が残っていた（PR #5 のレビューで指摘された）。
+    // 全体の上限（playwright.config.ts の 10 分）は他の検査のために据え置き、
+    // 重いこの検査にだけ持ち時間を与える。
+    test.setTimeout(22 * 60 * 1000);
+
     const errors: string[] = [];
     page.on('pageerror', (e) => errors.push(e.message));
 
@@ -76,13 +89,25 @@ test.describe('本体アプリ', () => {
     await expect(page.locator('#stage')).not.toHaveText('準備しています', { timeout: 60_000 });
 
     // 成功して見る画面に行くか、理由を出して止まるか。必ずどちらか。
+    //
+    // **待つ時間は 8 分。** ここは速度を測る検査ではない（playwright.config.ts の
+    // 冒頭のとおり、E2E は結果の正しさだけを見る）。それなのに 5 分で切っていたため、
+    // ランナーの速さのぶれで落ちるようになっていた。CI ではモデルを HuggingFace から
+    // 約 46MB 落とし、そのうえで SwiftShader の WASM で推論する。実測 4.3 分の回が
+    // あり、余裕がほとんど無かった（2026-09-11 に main で 5.0 分に届いて落ちた）。
+    //
+    // **落ちたときは、どこで止まったかを書く。** 前回は「成功も失敗もしていません」
+    // としか出ず、モデルの取得で止まったのか推論で止まったのか分からなかった。
     const done = page.locator('#view');
     const failed = page.locator('#workError');
     await expect(async () => {
       const ok = await done.isVisible();
       const ng = await failed.isVisible();
-      expect(ok || ng, '生成画面のまま、成功も失敗もしていません').toBe(true);
-    }).toPass({ timeout: 5 * 60 * 1000, intervals: [2000] });
+      const stage = (await page.locator('#stage').textContent().catch(() => '')) ?? '';
+      expect(ok || ng, `生成画面のまま、成功も失敗もしていません（いま: ${stage.trim()}）`).toBe(
+        true,
+      );
+    }).toPass({ timeout: 8 * 60 * 1000, intervals: [2000] });
 
     if (await failed.isVisible()) {
       // 失敗するなら、何が起きたかを必ず書く。空のカードは出さない。

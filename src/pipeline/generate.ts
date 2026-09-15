@@ -122,6 +122,13 @@ export interface GenerateResult {
    */
   readonly metricFix: number;
   readonly box: Letterbox;
+  /**
+   * 深度の正規化に使った範囲。`planes.depth`（0..1）を実距離へ戻すのに要る。
+   * 複数枚モードの位置合わせが使う（src/pipeline/generateMulti.ts）。
+   */
+  readonly depthRange: { readonly nearZ: number; readonly farZ: number };
+  /** 顔から測った頭のヨー[度]。符号だけ使う（docs/12 §12.15.6）。 */
+  readonly headYawDeg: number | null;
   /** 作業グリッド上の各プレーン。書き出し（.pgs）で使う。 */
   readonly planes: {
     readonly color: Uint8ClampedArray;
@@ -456,14 +463,29 @@ async function inferFaceLandmarks(
  * 使うと、どちらが先に効くかがブラウザ間で揃わない。
  *
  * 失敗しても生成は止めない。null を返せばグリッド経由に落ちる。
+ *
+ * ## 使い終わったら必ず `close()` する
+ *
+ * ここが抱える `ImageBitmap` は**元写真の全画素**である。1200 万画素の
+ * 写真なら 48 MB。`close()` を呼ばずに捨てると、GC が回るまで解放されない。
+ * 1枚モードでは 1 回きりなので表に出なかったが、複数枚モードは view の数だけ
+ * 作るので積み上がる。実機で「1枚目のプレビューは出たのに2枚目で
+ * `InvalidStateError: The source image could not be decoded.`」という報告を
+ * 受けた。復号の失敗は資源の枯渇でも起きる。
  */
-function nativeFacePatchSource(photo: Blob, lb: Letterbox): FacePatchSource | null {
+interface FacePatchProvider {
+  readonly crop: FacePatchSource;
+  /** 抱えている元写真の `ImageBitmap` を解放する。何度呼んでもよい。 */
+  close(): void;
+}
+
+function nativeFacePatchSource(photo: Blob, lb: Letterbox): FacePatchProvider | null {
   if (lb.scale >= 1) return null;
   if (typeof createImageBitmap !== 'function' || typeof OffscreenCanvas === 'undefined') return null;
 
   let bitmap: ImageBitmap | null = null;
   let failed = false;
-  return async (box: Rect, size: number): Promise<Uint8ClampedArray | null> => {
+  const crop = async (box: Rect, size: number): Promise<Uint8ClampedArray | null> => {
     if (failed) return null;
     try {
       if (!bitmap) bitmap = await createImageBitmap(photo, { imageOrientation: 'from-image' });
@@ -481,6 +503,14 @@ function nativeFacePatchSource(photo: Blob, lb: Letterbox): FacePatchSource | nu
       failed = true;
       return null;
     }
+  };
+  return {
+    crop,
+    close: () => {
+      bitmap?.close();
+      bitmap = null;
+      failed = true;
+    },
   };
 }
 
@@ -507,9 +537,9 @@ async function applyFaceDepth(
   backend: Backend,
   shaderF16: boolean,
   nativePatch: FacePatchSource | null = null,
-): Promise<{ depth: Float32Array; applied: boolean }> {
+): Promise<{ depth: Float32Array; applied: boolean; headYawDeg: number | null }> {
   const seed = headBoxFromMatte(alpha, grid, grid);
-  if (!seed) return { depth, applied: false };
+  if (!seed) return { depth, applied: false, headYawDeg: null };
 
   let session: ort.InferenceSession;
   try {
@@ -520,7 +550,7 @@ async function applyFaceDepth(
       shaderF16,
     );
   } catch {
-    return { depth, applied: false };
+    return { depth, applied: false, headYawDeg: null };
   }
 
   try {
@@ -541,17 +571,42 @@ async function applyFaceDepth(
       }
       box = next;
     }
-    if (!best || best.score < FACE_MIN_SCORE) return { depth, applied: false };
+    // 頭のヨー。**大きさは当てにしない、符号だけ使う。**
+    // 実測では ±90° の写真で 39〜49° しか出ず、モデル自身の確からしさも負だった
+    // （横向きは学習の外）。それでも符号は3枚とも正しく、複数枚モードで
+    // 「枠の入れ違い」を見つけるのに足りる（docs/12 §12.15.5、§12.15.6）。
+    const headYawDeg = best ? headYawFromLandmarks(best.points) : null;
+
+    if (!best || best.score < FACE_MIN_SCORE) return { depth, applied: false, headYawDeg };
 
     const surface = faceDepthSurface(best.points, best.box);
-    if (surface.covered < FACE_MIN_PIXELS) return { depth, applied: false };
+    if (surface.covered < FACE_MIN_PIXELS) return { depth, applied: false, headYawDeg };
     return {
       depth: applyFaceRelief(depth, surface, best.box, grid, grid, focalPx),
       applied: true,
+      headYawDeg,
     };
   } catch {
-    return { depth, applied: false };
+    return { depth, applied: false, headYawDeg: null };
   }
+}
+
+/**
+ * 顔の landmark から頭のヨー[度]を出す（docs/12 §12.15.5）。
+ *
+ * 234 が被写体の右、454 が左の端。x/y/z は同じ尺度で、z は小さいほど手前。
+ * 左右を結ぶベクトルを x–z 平面で見ると、そのまま頭の向きになる。
+ *
+ *   正面を向く … +x（画像の右）→ 0
+ *   画面の右を向く … +z（奥）→ +90°
+ *
+ * 符号の約束は `src/pipeline/align/rigid.ts` の `ViewPose.yaw` と同じ。
+ */
+function headYawFromLandmarks(points: readonly FaceLandmark[]): number | null {
+  const right = points[234];
+  const left = points[454];
+  if (!right || !left) return null;
+  return (Math.atan2(left.z - right.z, left.x - right.x) * 180) / Math.PI;
 }
 
 export interface DepthOutput {
@@ -944,22 +999,32 @@ export async function generate(photo: Blob, options: GenerateOptions): Promise<G
   // 顔の起伏。深度モデルは顔をほぼ平らな楕円として返すので、顔専用の
   // landmark モデルで細部の帯だけを差し替える（docs/09 §V9）。
   let faceApplied = false;
+  let headYawDeg: number | null = null;
   if (opts.mode === 'person' && depthOut.kind === 'depth') {
     report(0.58, '顔の立体を起こしています');
-    const withFace = await mark('顔の起伏', () =>
-      applyFaceDepth(
-        depthRaw,
-        rgba,
-        alpha,
-        grid,
-        focalPx,
-        opts.backend,
-        shaderF16,
-        nativeFacePatchSource(photo, prepared.box),
-      ),
-    );
-    depthRaw = withFace.depth;
-    faceApplied = withFace.applied;
+    // **元写真ぶんの ImageBitmap を抱えるので、終わったら必ず手放す。**
+    // 複数枚モードでは view の数だけ積み上がり、次の view の復号が
+    // 資源不足で落ちる（docs/12 §12.16.4）。
+    const patch = nativeFacePatchSource(photo, prepared.box);
+    try {
+      const withFace = await mark('顔の起伏', () =>
+        applyFaceDepth(
+          depthRaw,
+          rgba,
+          alpha,
+          grid,
+          focalPx,
+          opts.backend,
+          shaderF16,
+          patch ? patch.crop : null,
+        ),
+      );
+      depthRaw = withFace.depth;
+      faceApplied = withFace.applied;
+      headYawDeg = withFace.headYawDeg;
+    } finally {
+      patch?.close();
+    }
   }
 
   report(0.62, '奥行きを整えています');
@@ -1129,6 +1194,8 @@ export async function generate(photo: Blob, options: GenerateOptions): Promise<G
     build,
     metricFix,
     box: prepared.box,
+    depthRange: { nearZ: calibrated.nearZ, farZ: calibrated.farZ },
+    headYawDeg,
     planes: { color: rgba, alpha, depth: depth01 },
     stats: {
       focalPx,

@@ -133,6 +133,14 @@ export interface ViewResult {
   readonly slotFlipped: boolean;
   /** 顔から測ったヨーの符号が、枠と食い違っていた（`headYawDeg` を渡したときだけ）。 */
   readonly headYawDisagrees: boolean;
+  /**
+   * 回転の中心（rigid.ts の `PoseFrame`）。
+   *
+   * **姿勢と対で使わないと意味がない。** 呼び出し側が重心を計算し直すと、
+   * ここは間引いた点で求めているので微妙にずれ、姿勢は正しいのに位置だけ
+   * 食い違う。返して、そのまま使ってもらう。
+   */
+  readonly frame: PoseFrame;
 }
 
 export interface RegisterResult {
@@ -211,8 +219,12 @@ interface ViewPoints {
   readonly count: number;
   /** ヨーに対して変わらない縦の長さ（メートル）。尺度の拘束に使う。 */
   readonly verticalSpan: number;
-  /** 点の重心（この view のカメラ座標）。回転の中心になる。 */
+  /** 点の重心（この view のカメラ座標）。 */
   readonly centroid: readonly [number, number, number];
+  /** この view から見た被写体の横幅（メートル）。体の厚みを見積もるのに使う。 */
+  readonly widthX: number;
+  /** カメラにいちばん近い面の深度（メートル、下位 5%）。回転軸の基準。 */
+  readonly nearZ: number;
 }
 
 /**
@@ -276,7 +288,31 @@ function samplePoints(view: AlignView, target: number): ViewPoints {
     candidates > 0 ? ((vBottom - vTop + 1) * zMean) / view.camera.focalPx : 0;
 
   const inv = count > 0 ? 1 / count : 0;
-  return { x, y, z, count, verticalSpan, centroid: [cx * inv, cy * inv, cz * inv] };
+
+  // 横幅と、いちばん手前の面。回転軸の位置を決めるのに使う（§12.16.7）。
+  let xMin = Infinity;
+  let xMax = -Infinity;
+  for (let i = 0; i < count; i++) {
+    const v = x[i] as number;
+    if (v < xMin) xMin = v;
+    if (v > xMax) xMax = v;
+  }
+  // 手前の面は下位 5%。最小値だと1点の外れ値で決まってしまう。
+  const zs = new Float64Array(count);
+  zs.set(z.subarray(0, count));
+  zs.sort();
+  const nearZ = count > 0 ? (zs[Math.floor(count * 0.05)] as number) : 0;
+
+  return {
+    x,
+    y,
+    z,
+    count,
+    verticalSpan,
+    centroid: [cx * inv, cy * inv, cz * inv],
+    widthX: count > 0 ? xMax - xMin : 0,
+    nearZ,
+  };
 }
 
 /** 投影の覆いを描くための作業領域。評価のたびに使い回す。 */
@@ -306,6 +342,8 @@ export interface CostParts {
   readonly uncovered: number;
   /** 投影の縦の広がりと、マスクの縦の広がりの食い違い。 */
   readonly extent: number;
+  /** 観測した面より手前へ出てしまった量（自由空間の違反）。 */
+  readonly freeSpace: number;
   readonly total: number;
 }
 
@@ -340,6 +378,54 @@ const W_UNCOVERED = 0;
 const W_EXTENT = 0.15;
 
 /**
+ * **自由空間の違反**の重み（docs/12 §12.16.7）。
+ *
+ * ある view が観測した面より**手前**に、別の view の点が来てはいけない。
+ * そこはそのカメラが見通した空間で、物があれば写っていたはずである。
+ *
+ * ## なぜこれが要るのか
+ *
+ * 収まり（`containment`）だけで解くと、**全部を体の内側へ潰し込むのがいちばん
+ * 安い**。横向きの面を体の真ん中に置いても、正面のシルエットの内側には収まる
+ * ので、収まりの項は文句を言わない。実素材でまさにそうなった。
+ *
+ * | view | 置かれた x の中心 | 本来あるべき位置 |
+ * |---|---|---|
+ * | 正面 | 0.000 | 0（体の幅は ±0.17） |
+ * | 右向き | **−0.077** | 体の右端あたり |
+ * | 左向き | **+0.059** | 体の左端あたり |
+ *
+ * しかも潰れた面は正面が観測した面（z=0.669）より手前（z=0.641）に出るので、
+ * 顔の上に破片が乗る。**M1 = 0.969 という高い値は、正しく合ったからではなく
+ * 潰れているから出ていた。** 測っていた量が壊れ方を隠していた。
+ *
+ * 収まりが**横方向**を縛り、これが**奥行き**を縛る。二つで初めて置き場所が決まる。
+ *
+ * ## 片側だけ罰する
+ *
+ * 既存の `surface` 項は差の絶対値を見ていて、「面を奥へ逃がすほど良い」抜け道を
+ * 塞ぐために両側を見ていた。だが両側を見ると、共視が増える**低い角度**のほうが
+ * 安くなり、角度を過小に引っぱる（§12.15.2 でそれを理由に重みを 0 にした）。
+ *
+ * ## 入れてみたが、**悪くなったので 0 にした**
+ *
+ * 回転の中心を直した（下）うえで重みを振ると、実素材でこうなった。
+ *
+ * | 重み | 解いた yaw | M1（正面/右/左） |
+ * |---|---|---|
+ * | **0（採用）** | **93.6° / −87.0°** | **0.958 / 0.986 / 0.980** |
+ * | 0.5 | 112.4° / −100.6° | 0.903 / 0.881 / 0.866 |
+ * | 1.5 | 117.4° / −110.9° | 0.830 / 0.712 / 0.791 |
+ *
+ * 入れるほど角度が ±90° を通り越し、収まりも悪くなる。手前へ出た量を罰すると
+ * 「面を奥へ逃がす」方向に効き、余計に回してでも逃がそうとするためと見ている。
+ * 潰れの原因は目的関数ではなく**回転の中心**だった（下）ので、そちらを直せば
+ * この項は要らない。計算は残す（診断に出したいのと、次に試す人が同じ測定を
+ * 取り直せるように）。
+ */
+const W_FREESPACE = 0;
+
+/**
  * 目的関数。
  *
  * `containment` は「はみ出した距離の平均 ÷ 被写体の大きさ」、
@@ -360,6 +446,7 @@ function evaluate(
   let outSum = 0;
   let outCount = 0;
   let freeSum = 0;
+  let aheadSum = 0;
   let uncoveredSum = 0;
   let targets = 0;
   let extentSum = 0;
@@ -448,8 +535,12 @@ function evaluate(
         // ので、両側を見る。ゲートを超えた差は遮蔽とみなして頭打ちにする。
         const zSeen = gj.depth[idx] as number;
         if (zSeen > 0) {
-          const diff = Math.abs(zSeen - (scratch.proj[2] as number));
+          const zHere = scratch.proj[2] as number;
+          const diff = Math.abs(zSeen - zHere);
           freeSum += Math.min(SURFACE_GATE, diff) / SURFACE_GATE;
+          // 自由空間の違反。観測した面より**手前**にある量だけを罰する。
+          const ahead = zSeen - zHere;
+          if (ahead > 0) aheadSum += Math.min(SURFACE_GATE, ahead) / SURFACE_GATE;
         } else {
           freeSum += 1; // マスクの外に落ちた。合っていないので最大の罰
         }
@@ -496,6 +587,7 @@ function evaluate(
 
   const containment = outCount > 0 ? outSum / outCount : 0;
   const surface = outCount > 0 ? freeSum / outCount : 1;
+  const freeSpace = outCount > 0 ? aheadSum / outCount : 0;
   const uncoveredRatio = targets > 0 ? uncoveredSum / targets : 0;
   const extent = extentCount > 0 ? extentSum / extentCount : 0;
   return {
@@ -503,11 +595,13 @@ function evaluate(
     surface,
     uncovered: uncoveredRatio,
     extent,
+    freeSpace,
     total:
       W_CONTAINMENT * containment +
       W_SURFACE * surface +
       W_UNCOVERED * uncoveredRatio +
-      W_EXTENT * extent,
+      W_EXTENT * extent +
+      W_FREESPACE * freeSpace,
   };
 }
 
@@ -572,19 +666,26 @@ function withinBounds(pose: ViewPose, initialScale: number): boolean {
 }
 
 /**
- * 3枚（または2枚）の位置合わせを解く。
+ * 合わせと測りに要る道具を一度に作る。
  *
- * 基準は `slot === 'front'` の view。無ければシルエットの面積が最大の view
- * （docs/12 §12.7「2枚のとき」）。基準の姿勢は動かさない。
+ * `registerViews` と `measureAtPoses` の両方が使う。**別々に組み立てては
+ * いけない。** 回転の中心（`frames`）は合わせに使う点の重心から決まるので、
+ * ここがずれると同じ姿勢でも別の数字が出て、測った値を突き合わせられない。
  */
-export function registerViews(views: readonly AlignView[], options: RegisterOptions = {}): RegisterResult {
-  if (views.length < 2) throw new Error('位置合わせには2枚以上が要ります');
+interface AlignContext {
+  readonly grids: readonly SilhouetteGrid[];
+  readonly measureGrids: readonly SilhouetteGrid[];
+  readonly points: readonly ViewPoints[];
+  readonly measurePoints: readonly ViewPoints[];
+  readonly cams: readonly CameraIntrinsics[];
+  readonly referenceIndex: number;
+  readonly frames: readonly PoseFrame[];
+  readonly scratch: Scratch;
+}
 
+function prepareAlign(views: readonly AlignView[], options: RegisterOptions): AlignContext {
   const gridLongSide = options.gridLongSide ?? 128;
   const samples = options.samplesPerView ?? 3000;
-  const yawRange = options.yawSearchRange ?? (40 * Math.PI) / 180;
-  const yawStep = options.yawSearchStep ?? (2 * Math.PI) / 180;
-  const maxRounds = options.maxRounds ?? 60;
 
   // **合わせるときは、点もマスクも「胴と頭」で揃える。**
   // 胴だけの点を全身のマスクと比べると、収まりは甘くなり、縦の広がりは
@@ -626,6 +727,90 @@ export function registerViews(views: readonly AlignView[], options: RegisterOpti
     referenceIndex = Math.max(0, best);
   }
 
+  // 回転の中心。その view の重心を、基準 view の重心へ運ぶ（rigid.ts 冒頭）。
+  const refCentroid = (points[referenceIndex] as ViewPoints).centroid;
+  const frames: PoseFrame[] = points.map((p, i) =>
+    i === referenceIndex ? IDENTITY_FRAME : { source: p.centroid, target: refCentroid },
+  );
+
+  const maxCells = Math.max(
+    ...grids.map((g) => g.width * g.height),
+    ...measureGrids.map((g) => g.width * g.height),
+  );
+  return {
+    grids,
+    measureGrids,
+    points,
+    measurePoints,
+    cams,
+    referenceIndex,
+    frames,
+    scratch: makeScratch(maxCells),
+  };
+}
+
+/** `measureAtPoses` が返す、view 1つぶんの測定値。 */
+export interface ViewMeasure {
+  readonly slot: ViewSlot;
+  readonly containmentPx: number;
+  readonly insideRatio: number;
+  readonly iou: number;
+}
+
+/**
+ * **与えた姿勢**での収まりを測る（調査用）。
+ *
+ * `registerViews` が解いた姿勢だけでなく、**わざと間違えた姿勢**でも測れる。
+ * 合格ラインを決めるには「正しく合ったときの値」だけでは足りない。
+ * 間違ったときにどこまで悪くなるかを知らないと、線を引く場所が決まらない。
+ * 0.95 という閾値は前者だけを見て置いてしまい、実素材の正解（0.949）を
+ * 落とした（docs/12 §12.16.5）。
+ *
+ * 毎回グリッドと点を作り直すので遅い。生成の経路からは呼ばない。
+ */
+export function measureAtPoses(
+  views: readonly AlignView[],
+  poses: readonly ViewPose[],
+  options: RegisterOptions = {},
+): readonly ViewMeasure[] {
+  const ctx = prepareAlign(views, options);
+  const mats = poses.map((p) => rotationMatrix(p));
+  return views.map((v, j) => {
+    const c = measureContainment(
+      ctx.measurePoints,
+      ctx.measureGrids,
+      ctx.cams,
+      poses,
+      mats,
+      ctx.frames,
+      ctx.scratch,
+      j,
+    );
+    return {
+      slot: v.slot,
+      containmentPx: c.meanSpill,
+      insideRatio: c.insideRatio,
+      iou: measureIou(ctx.measurePoints, ctx.measureGrids, ctx.cams, poses, mats, ctx.frames, ctx.scratch, j),
+    };
+  });
+}
+
+/**
+ * 3枚（または2枚）の位置合わせを解く。
+ *
+ * 基準は `slot === 'front'` の view。無ければシルエットの面積が最大の view
+ * （docs/12 §12.7「2枚のとき」）。基準の姿勢は動かさない。
+ */
+export function registerViews(views: readonly AlignView[], options: RegisterOptions = {}): RegisterResult {
+  if (views.length < 2) throw new Error('位置合わせには2枚以上が要ります');
+
+  const yawRange = options.yawSearchRange ?? (40 * Math.PI) / 180;
+  const yawStep = options.yawSearchStep ?? (2 * Math.PI) / 180;
+  const maxRounds = options.maxRounds ?? 60;
+
+  const ctx = prepareAlign(views, options);
+  const { grids, measureGrids, points, measurePoints, cams, referenceIndex, frames, scratch } = ctx;
+
   // 初期姿勢。yaw は枠から、尺度はヨー不変の縦の長さから決める（docs/12 §12.7）。
   const refSpan = (points[referenceIndex] as ViewPoints).verticalSpan;
   const poses: ViewPose[] = views.map((v, i) => {
@@ -636,15 +821,6 @@ export function registerViews(views: readonly AlignView[], options: RegisterOpti
   });
   const mats = poses.map((p) => rotationMatrix(p));
   const initialScale = poses.map((p) => p.scale);
-
-  // 回転の中心。その view の重心を、基準 view の重心へ運ぶ（rigid.ts 冒頭）。
-  const refCentroid = (points[referenceIndex] as ViewPoints).centroid;
-  const frames: PoseFrame[] = points.map((p, i) =>
-    i === referenceIndex ? IDENTITY_FRAME : { source: p.centroid, target: refCentroid },
-  );
-
-  const maxCells = Math.max(...grids.map((g) => g.width * g.height), ...measureGrids.map((g) => g.width * g.height));
-  const scratch = makeScratch(maxCells);
 
   const cost = (): number =>
     evaluate(points, grids, cams, poses, mats, frames, referenceIndex, scratch).total;
@@ -744,18 +920,21 @@ export function registerViews(views: readonly AlignView[], options: RegisterOpti
   const parts = evaluate(points, grids, cams, poses, mats, frames, referenceIndex, scratch);
   // 測るときは被写体全体の点を使う（上のコメント）。重心（frames）は合わせに
   // 使った点のものをそのまま使う。姿勢はそれを前提に解いてあるため。
-  const results: ViewResult[] = views.map((v, j) => ({
-    slot: v.slot,
-    pose: poses[j] as ViewPose,
-    slotFlipped: flipped[j] === true,
-    headYawDisagrees:
-      v.headYawDeg !== undefined && isFlipped(expectedYaw[j] as number, (v.headYawDeg * Math.PI) / 180),
-    containmentPx: measureContainment(measurePoints, measureGrids, cams, poses, mats, frames, scratch, j)
-      .meanSpill,
-    insideRatio: measureContainment(measurePoints, measureGrids, cams, poses, mats, frames, scratch, j)
-      .insideRatio,
-    iou: measureIou(measurePoints, measureGrids, cams, poses, mats, frames, scratch, j),
-  }));
+  const results: ViewResult[] = views.map((v, j) => {
+    // 収まりは1回だけ測る。meanSpill と insideRatio は同じ走査から出る。
+    const c = measureContainment(measurePoints, measureGrids, cams, poses, mats, frames, scratch, j);
+    return {
+      slot: v.slot,
+      pose: poses[j] as ViewPose,
+      slotFlipped: flipped[j] === true,
+      frame: frames[j] as PoseFrame,
+      headYawDisagrees:
+        v.headYawDeg !== undefined && isFlipped(expectedYaw[j] as number, (v.headYawDeg * Math.PI) / 180),
+      containmentPx: c.meanSpill,
+      insideRatio: c.insideRatio,
+      iou: measureIou(measurePoints, measureGrids, cams, poses, mats, frames, scratch, j),
+    };
+  });
 
   return {
     views: results,
