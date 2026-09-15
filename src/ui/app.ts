@@ -36,6 +36,15 @@ const PRESETS: Record<Preset, PresetSpec> = {
   high: { grid: WORKING_GRID, reduction: 0, inpaint: true, depthTiles: true, fineGridRatio: 2.0 },
 };
 
+/**
+ * 見え方の選択（docs/13 §13.2 T1）。
+ *
+ * `crisp` は色にアンシャープマスクを掛ける。**写真に無いものを足す**ので
+ * 既定は `faithful`。強さ 0.25 で参照実装（SHARP）と同じ見え方になる。
+ */
+const LOOKS = { faithful: 0, crisp: 0.25 } as const;
+type Look = keyof typeof LOOKS;
+
 const $ = <T extends HTMLElement>(id: string): T => {
   const el = document.getElementById(id);
   if (!el) throw new Error(`要素がありません: ${id}`);
@@ -93,6 +102,12 @@ function currentPreset(): Preset {
 function currentMode(): SubjectMode {
   const el = document.querySelector<HTMLInputElement>('input[name="mode"]:checked');
   return (el?.value as SubjectMode) ?? 'person';
+}
+
+/** 選ばれている見え方の、鮮鋭化の強さ。 */
+function currentSharpen(): number {
+  const el = document.querySelector<HTMLInputElement>('input[name="look"]:checked');
+  return LOOKS[(el?.value as Look) ?? 'faithful'] ?? 0;
 }
 
 function setProgress(fraction: number, label: string): void {
@@ -175,6 +190,7 @@ async function run(file: File): Promise<void> {
       inpaint: preset.inpaint,
       depthTiles: preset.depthTiles,
       ...(preset.fineGridRatio === undefined ? {} : { fineGridRatio: preset.fineGridRatio }),
+      sharpen: currentSharpen(),
       backend,
       // shader-f16 が無い WebGPU では q4f16 のモデルが黙って壊れる。
       // その場合は uint8 側を落とす（modelCatalog の manifestBackendKey）。

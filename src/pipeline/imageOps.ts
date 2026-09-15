@@ -6,6 +6,8 @@
  * 戻す意味がない。どちらも素の配列で扱う。
  */
 
+import { SUBJECT_ALPHA } from './1-matte';
+
 /** ImageNet の平均と標準偏差。深度モデルはこれで正規化して学習されている。 */
 export const IMAGENET_MEAN = [0.485, 0.456, 0.406] as const;
 export const IMAGENET_STD = [0.229, 0.224, 0.225] as const;
@@ -43,6 +45,135 @@ export function resizeRgba(
         const d = src[(y1 * sw + x0) * 4 + c] as number;
         const e = src[(y1 * sw + x1) * 4 + c] as number;
         out[o + c] = a * (1 - wx) * (1 - wy) + b * wx * (1 - wy) + d * (1 - wx) * wy + e * wx * wy;
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * 色を鮮鋭化する（アンシャープマスク、docs/13 §13.2 T1）。
+ *
+ * **これは写真に無いものを足す処理である。** 既定では掛けない。
+ *
+ * 実測（描画 1 画素 = 写真 1 画素 にそろえて、胴の局所コントラストを測る）:
+ *
+ * | | 局所コントラスト | 元写真に対する比 |
+ * |---|---|---|
+ * | **元写真（情報の天井）** | **9.61** | **100%** |
+ * | 私たち（強さ 0） | 9.79 | 102% |
+ * | 私たち（**強さ 0.25**） | 12.54 | **131%** |
+ * | 参照実装（SHARP） | 12.09 | 126% |
+ *
+ * 参照実装は回帰網が鮮鋭化していて、元写真より 26% コントラストが高い。
+ * 強さ 0.25 でそこに並ぶ。ただし**スプラットの格子模様も一緒に持ち上がる**
+ * ので、既定は素通しにしてある。
+ *
+ * **被写体の外は混ぜない。** レターボックスの余白や背景を低域に混ぜると、
+ * シルエットの内側に縁取り（ハロ）が出る。α で重みをつけて避ける。
+ *
+ * @param alpha  被写体のマット。これが薄い画素は低域に混ぜない。
+ * @param radius 低域を取る箱平均の半径（画素）。
+ * @param amount 強さ。0 で何もしない。
+ * @returns 新しい RGBA8。α は入力のまま。
+ */
+export function unsharpMaskRgba(
+  rgba: ArrayLike<number>,
+  alpha: ArrayLike<number>,
+  width: number,
+  height: number,
+  radius: number,
+  amount: number,
+): Uint8ClampedArray {
+  const out = Uint8ClampedArray.from(rgba as ArrayLike<number>);
+  const r = Math.round(radius);
+  if (!(amount > 0) || r < 1) return out;
+
+  const n = width * height;
+  const mask = new Uint8Array(n);
+  for (let i = 0; i < n; i++) mask[i] = (alpha[i] as number) >= SUBJECT_ALPHA ? 1 : 0;
+
+  // 低域。被写体の中だけを混ぜる分離可能な箱平均（窓を転がすので O(n)）。
+  // 内側のループは関数を挟まずに書く。閉包にすると 4M 画素で 10 倍以上遅い。
+  const rowSum = new Float32Array(n * 3);
+  const rowCount = new Int32Array(n);
+  for (let y = 0; y < height; y++) {
+    const row = y * width;
+    let c0 = 0;
+    let c1 = 0;
+    let c2 = 0;
+    let cnt = 0;
+    const first = Math.min(r, width - 1);
+    for (let x = 0; x <= first; x++) {
+      if (mask[row + x] === 0) continue;
+      const o = (row + x) * 4;
+      c0 += rgba[o] as number;
+      c1 += rgba[o + 1] as number;
+      c2 += rgba[o + 2] as number;
+      cnt++;
+    }
+    for (let x = 0; x < width; x++) {
+      const i = row + x;
+      rowSum[i * 3] = c0;
+      rowSum[i * 3 + 1] = c1;
+      rowSum[i * 3 + 2] = c2;
+      rowCount[i] = cnt;
+      const add = x + r + 1;
+      if (add < width && mask[row + add] === 1) {
+        const o = (row + add) * 4;
+        c0 += rgba[o] as number;
+        c1 += rgba[o + 1] as number;
+        c2 += rgba[o + 2] as number;
+        cnt++;
+      }
+      const drop = x - r;
+      if (drop >= 0 && mask[row + drop] === 1) {
+        const o = (row + drop) * 4;
+        c0 -= rgba[o] as number;
+        c1 -= rgba[o + 1] as number;
+        c2 -= rgba[o + 2] as number;
+        cnt--;
+      }
+    }
+  }
+
+  for (let x = 0; x < width; x++) {
+    let c0 = 0;
+    let c1 = 0;
+    let c2 = 0;
+    let cnt = 0;
+    const first = Math.min(r, height - 1);
+    for (let y = 0; y <= first; y++) {
+      const j = (y * width + x) * 3;
+      c0 += rowSum[j] as number;
+      c1 += rowSum[j + 1] as number;
+      c2 += rowSum[j + 2] as number;
+      cnt += rowCount[y * width + x] as number;
+    }
+    for (let y = 0; y < height; y++) {
+      const i = y * width + x;
+      if (mask[i] === 1 && cnt > 0) {
+        const o = i * 4;
+        const inv = 1 / cnt;
+        out[o] = (rgba[o] as number) + amount * ((rgba[o] as number) - c0 * inv);
+        out[o + 1] = (rgba[o + 1] as number) + amount * ((rgba[o + 1] as number) - c1 * inv);
+        out[o + 2] = (rgba[o + 2] as number) + amount * ((rgba[o + 2] as number) - c2 * inv);
+      }
+      const add = y + r + 1;
+      if (add < height) {
+        const j = (add * width + x) * 3;
+        c0 += rowSum[j] as number;
+        c1 += rowSum[j + 1] as number;
+        c2 += rowSum[j + 2] as number;
+        cnt += rowCount[add * width + x] as number;
+      }
+      const drop = y - r;
+      if (drop >= 0) {
+        const j = (drop * width + x) * 3;
+        c0 -= rowSum[j] as number;
+        c1 -= rowSum[j + 1] as number;
+        c2 -= rowSum[j + 2] as number;
+        cnt -= rowCount[drop * width + x] as number;
       }
     }
   }

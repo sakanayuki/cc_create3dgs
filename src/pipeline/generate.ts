@@ -50,6 +50,7 @@ import {
   minMax,
   resizePlane,
   resizeRgba,
+  unsharpMaskRgba,
   toTensorNCHW,
 } from './imageOps';
 import { createSession, type Backend } from '../runtime/OrtSession';
@@ -86,6 +87,13 @@ export interface GenerateOptions {
    * 省略すると `FINE_GRID_RATIO`。高品質プリセットは 2.0（元写真の解像度）。
    */
   readonly fineGridRatio?: number;
+  /**
+   * 色の鮮鋭化の強さ（docs/13 §13.2 T1）。省略すると 0（掛けない）。
+   *
+   * **写真に無いものを足す処理である。** 0.25 で参照実装（SHARP）と同じ
+   * 見え方になるが、スプラットの格子模様も一緒に持ち上がる。
+   */
+  readonly sharpen?: number;
 }
 
 /**
@@ -835,6 +843,9 @@ const FINE_GRID_RATIO = 1.5;
  */
 const FINE_GRID_RATIO_HIGH = 2.0;
 
+/** 鮮鋭化の低域を取る半径（画素）。§13.1 の PoC はこの値で測った。 */
+const SHARPEN_RADIUS = 2;
+
 /**
  * 立ち姿の人物の身長として仮定する値（メートル）。
  *
@@ -1033,6 +1044,13 @@ export async function generate(photo: Blob, options: GenerateOptions): Promise<G
     fine > grid
       ? Uint8ClampedArray.from(resizePlane(alpha, grid, grid, fine, fine))
       : alpha;
+  // 色の鮮鋭化（既定は掛けない）。写真に無いものを足すので、選んだときだけ。
+  const shownRgba =
+    (opts.sharpen ?? 0) > 0
+      ? await mark('色の鮮鋭化', () =>
+          unsharpMaskRgba(fineRgba, fineAlpha, fine, fine, SHARPEN_RADIUS, opts.sharpen ?? 0),
+        )
+      : fineRgba;
   const fineMetric = fine > grid ? resizePlane(metric, grid, grid, fine, fine) : metric;
   const fineDepth01 = new Float32Array(fine * fine);
   for (let i = 0; i < fineDepth01.length; i++) {
@@ -1046,10 +1064,10 @@ export async function generate(photo: Blob, options: GenerateOptions): Promise<G
 
   report(0.82, 'ガウシアンを配置しています');
   const samplingParams = await mark('サンプリング閾値', () =>
-    solveSamplingParams(fineDepth01, fineRgba, fineAlpha, fine, fine, opts.reduction),
+    solveSamplingParams(fineDepth01, shownRgba, fineAlpha, fine, fine, opts.reduction),
   );
   const cells = await mark('適応サンプリング', () =>
-    adaptiveSample(fineDepth01, fineRgba, fineAlpha, fine, fine, samplingParams),
+    adaptiveSample(fineDepth01, shownRgba, fineAlpha, fine, fine, samplingParams),
   );
 
   report(0.9, '厚みをつけています');
@@ -1076,7 +1094,7 @@ export async function generate(photo: Blob, options: GenerateOptions): Promise<G
   // まずインペイント無しで1枚作って見せる（docs/03 §3.1 のプレビュー）。
   // 待たせるより、粗くても先に立体を出すほうが体感が速い。
   const preview = await mark('スプラット組み立て', () =>
-    buildSplats(camera, fineRgba, fineAlpha, thickness, null, buildParams),
+    buildSplats(camera, shownRgba, fineAlpha, thickness, null, buildParams),
   );
   opts.onPreview?.(preview);
 
@@ -1098,7 +1116,7 @@ export async function generate(photo: Blob, options: GenerateOptions): Promise<G
       const plane =
         fine > grid ? resizeRgba(painted.plane, grid, grid, fine, fine) : painted.plane;
       build = await mark('スカート色の差し替え', () =>
-        buildSplats(camera, fineRgba, fineAlpha, thickness, null, buildParams, plane),
+        buildSplats(camera, shownRgba, fineAlpha, thickness, null, buildParams, plane),
       );
     }
   }
