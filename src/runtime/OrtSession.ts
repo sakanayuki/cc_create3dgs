@@ -46,6 +46,50 @@ export interface LoadResult {
 const CACHE_NAME = 'photosplat-models-v1';
 let configured = false;
 
+/**
+ * セッションの記録レベル。3 = エラーだけ（docs/09 §V26）。
+ *
+ * **`ort.env.logLevel` だけでは足りない。** あちらは ORT の**環境**の既定値で、
+ * `VerifyEachNodeIsAssignedToAnEp` のようにセッションの記録器から出るものは
+ * `SessionOptions.logSeverityLevel`（既定 2 = 警告）で決まる。環境側を
+ * `'error'` にしてあっても、次の 2 行が推論のたびに出続けていた:
+ *
+ * ```
+ * [W:onnxruntime:, session_state.cc:1166 VerifyEachNodeIsAssignedToAnEp]
+ *   Some nodes were not assigned to the preferred execution providers ...
+ * [W:onnxruntime:, session_state.cc:1400 VerifyEachNodeIsAssignedToAnEp]
+ *   Rerunning with verbose output on a non-minimal build will show node assignments.
+ * ```
+ *
+ * **これは不具合ではない。** WebGPU の実行プロバイダは、形に関わる演算
+ * （Shape・Gather など）を**わざと CPU へ置く**。ORT 自身が
+ * 「性能に影響するかもしれないし、しないかもしれない」と書いている類の
+ * 情報であって、失敗ではない。
+ *
+ * ただし**黙らせたまま見えなくはしない。** `?ortlog=warning` を付けると
+ * 元の警告が戻る。実行プロバイダへの割り当てを疑うときはそれで見る。
+ */
+const SESSION_LOG_SEVERITY = 3;
+
+/** URL に `?ortlog=warning`（または `info`/`verbose`）があれば、その段で記録する。 */
+function sessionLogSeverity(): 0 | 1 | 2 | 3 | 4 {
+  try {
+    const want = new URLSearchParams(globalThis.location?.search ?? '').get('ortlog');
+    const table: Record<string, 0 | 1 | 2 | 3 | 4> = {
+      verbose: 0,
+      info: 1,
+      warning: 2,
+      error: 3,
+      fatal: 4,
+    };
+    const level = want ? table[want] : undefined;
+    if (level !== undefined) return level;
+  } catch {
+    // location が無い環境（worker・検査）では既定のまま
+  }
+  return SESSION_LOG_SEVERITY;
+}
+
 /** ORT のグローバル設定。一度だけ行う。 */
 export function configureOrt(opts: { adapter?: GPUAdapter; wasmThreads?: number } = {}): void {
   if (configured) return;
@@ -137,6 +181,10 @@ export async function createSession(
   const options: ort.InferenceSession.SessionOptions = {
     executionProviders: [attempt.backend],
     graphOptimizationLevel: 'all',
+    // 環境の logLevel とは別に、セッションの記録器にも段を渡す。
+    // これが無いと「一部の節が優先の実行プロバイダに割り当てられなかった」
+    // という**正常な**警告が推論のたびに出る（上の SESSION_LOG_SEVERITY）。
+    logSeverityLevel: sessionLogSeverity(),
   };
 
   if (src.externalData) {

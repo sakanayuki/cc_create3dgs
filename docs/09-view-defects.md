@@ -896,6 +896,38 @@ WebGL2 の両方で見る。旧実装に戻すと距離 0.45 で青が 17.8%（W
 `frame` 無しなら正規化のまま、`metricFix` 無しなら深度モデルの実寸のまま）と、
 `tests/unit/statureFix.test.ts` の 5 つ。
 
+### V26 ORT の警告が推論のたびに出続ける（v2.6.10）
+
+**症状。** 生成のたびに、コンソールに次の 2 行が出る。
+
+```
+[W:onnxruntime:, session_state.cc:1166 VerifyEachNodeIsAssignedToAnEp]
+  Some nodes were not assigned to the preferred execution providers ...
+[W:onnxruntime:, session_state.cc:1400 VerifyEachNodeIsAssignedToAnEp]
+  Rerunning with verbose output on a non-minimal build will show node assignments.
+```
+
+**これは不具合ではない。** `W:` は警告であって失敗ではない。WebGPU の実行
+プロバイダは、形に関わる演算（Shape・Gather など）を**わざと CPU へ置く**。
+ORT 自身が「性能に影響するかもしれないし、しないかもしれない」と書いている
+類の知らせである。**出力は正しい。**
+
+**なぜ `ort.env.logLevel = 'error'` で消えなかったか。** あれは ORT の
+**環境**の既定値で、`VerifyEachNodeIsAssignedToAnEp` はセッションの記録器から
+出る。セッション側の段は `SessionOptions.logSeverityLevel`（**既定 2 = 警告**）
+が決める。環境を `'error'` にしても、セッションに渡していなければ警告は出る。
+
+**直し方。** `InferenceSession.create` の選択肢に `logSeverityLevel: 3`
+（エラーだけ）を渡す。
+
+**黙らせたまま見えなくはしない。** URL に `?ortlog=warning` を付けると元の
+警告が戻る（`info` / `verbose` も同じ表で受ける）。実行プロバイダへの割り当てを
+疑うときはそれで見る。
+
+**検査。** `tests/e2e/app.spec.ts` で、生成を 1 回通す間の `console` を拾い、
+`VerifyEachNodeIsAssignedToAnEp` と `[W:onnxruntime` が **0 件**であることを
+見る。黙ったことを数で押さえないと、また出るようになっても気付けない。
+
 ## 9.2 検査の考え方
 
 正面図の一致だけを見ても意味が無い（前面シェルは定義上一致する）。**回して測る**。

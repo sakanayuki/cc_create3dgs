@@ -76,6 +76,18 @@ test.describe('本体アプリ', () => {
     const errors: string[] = [];
     page.on('pageerror', (e) => errors.push(e.message));
 
+    // ORT の記録を拾う。推論のたびに出ていた
+    // 「一部の節が優先の実行プロバイダに割り当てられなかった」という**正常な**
+    // 警告を、セッションの段で黙らせてある（docs/09 §V26）。黙ったことを
+    // 数で確かめないと、また出るようになっても気付けない。
+    const ortNoise: string[] = [];
+    page.on('console', (m) => {
+      const t = m.text();
+      if (t.includes('VerifyEachNodeIsAssignedToAnEp') || t.includes('[W:onnxruntime')) {
+        ortNoise.push(t.slice(0, 200));
+      }
+    });
+
     await page.goto('/');
     await expect(page.locator('#env')).not.toContainText('判定中', { timeout: 30_000 });
 
@@ -128,5 +140,11 @@ test.describe('本体アプリ', () => {
 
     // 未捕捉の例外を残したまま終わらない
     expect(errors, `ページ内で例外が起きました: ${errors.join(' / ')}`).toEqual([]);
+
+    // ORT の警告が console を埋めていないこと（docs/09 §V26）
+    expect(
+      ortNoise,
+      `ORT の警告が出ています（${ortNoise.length} 件）: ${ortNoise.slice(0, 2).join(' / ')}`,
+    ).toEqual([]);
   });
 });
