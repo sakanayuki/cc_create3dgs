@@ -91,7 +91,7 @@ describe('複数 view の合成', () => {
     expect(out.data).toBe(b.data); // 詰め直さない
     expect(out.count).toBe(b.count);
     expect(out.normalization).toBe(b.normalization);
-    expect(out.mergeStats).toEqual({ before: 8, after: 8, dropped: 0, cell: 0 });
+    expect(out.mergeStats).toEqual({ before: 8, after: 8, dropped: 0, cell: 0, freeSpaceDropped: 0 });
   });
 
   it('恒等の姿勢で2枚重ねても、形が変わらない（落とさない設定）', () => {

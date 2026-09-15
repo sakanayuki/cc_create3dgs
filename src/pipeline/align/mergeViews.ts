@@ -42,7 +42,16 @@
  */
 import { decodeOct, encodeOct, packHalf2, unpackHalf2 } from '../../codec/pack';
 import type { SplatBuild } from '../6-splats';
-import { rotationMatrix, toReference, type Mat3, type PoseFrame, type ViewPose } from './rigid';
+import {
+  fromReference,
+  project,
+  rotationMatrix,
+  toReference,
+  type CameraIntrinsics,
+  type Mat3,
+  type PoseFrame,
+  type ViewPose,
+} from './rigid';
 
 /** 24 バイト × N。src/pipeline/6-splats.ts の詰め方と同じ。 */
 const SPLAT_BYTES = 24;
@@ -54,6 +63,20 @@ export interface MergeSource {
   readonly pose: ViewPose;
   /** 回転の中心（src/pipeline/align/rigid.ts）。 */
   readonly frame: PoseFrame;
+  /**
+   * この view が実際に観測した深度（省略可）。
+   *
+   * 渡すと「**この view が見通した空間**に他の view の点が入っていないか」を
+   * 調べられる（`dropFreeSpace`）。カメラが見た面より手前に物があれば、
+   * その写真に写っていたはずである。写っていないなら、そこに物は無い。
+   */
+  readonly occluder?: {
+    readonly width: number;
+    readonly height: number;
+    readonly camera: CameraIntrinsics;
+    /** カメラからの距離（メートル）。被写体の外は 0。 */
+    readonly depth: Float32Array;
+  };
 }
 
 export interface MergeOptions {
@@ -101,12 +124,81 @@ export interface MergeOptions {
    */
   readonly keepSourceIds?: boolean;
   /**
+   * 「観測した面より手前」に出た点を落とすか。既定 true（`occluder` を渡したとき）。
+   *
+   * 見逃してよい量は、体の大きさに対する割合で置く。位置合わせの残差
+   * （128 画素のグリッドで 1 画素 ≒ 体の 0.8%）より大きくないと、正しく
+   * 合っている面まで削る。既定 0.02。
+   */
+  readonly freeSpaceRatio?: number;
+  /**
    * 向かい合った面（薄い部位の表と裏）を分けるか。既定 true。
    *
    * false にすると向きを一切見ない。**体の表と裏を潰すので本番では使えない。**
    * 残っている二重像が向きの扱いのせいかどうかを測るために置いてある。
    */
   readonly splitSides?: boolean;
+}
+
+/**
+ * **カメラが見通した空間に入ってしまった点**を落とす（docs/12 §12.16.7）。
+ *
+ * ある view が観測した面より手前に他の view の点があれば、その写真に写って
+ * いたはずである。写っていないのだから、そこに物は無い。位置合わせの取りこぼし
+ * が、正面から見たときの「淡い破片」としてそのまま出るのを止める。
+ *
+ * **これは目的関数に入れるべきではない**（入れると角度が暴れる。
+ * registerViews の `W_FREESPACE` の記録）。姿勢を解いたあとの、後始末である。
+ */
+function dropFreeSpace(
+  count: number,
+  pos: Float64Array,
+  source: Uint16Array,
+  sources: readonly MergeSource[],
+  tolerance: number,
+  keep: Uint8Array,
+): number {
+  const probes = sources
+    .map((s, i) => ({ i, occ: s.occluder, pose: s.pose, frame: s.frame }))
+    .filter((p): p is { i: number; occ: NonNullable<MergeSource['occluder']>; pose: ViewPose; frame: PoseFrame } =>
+      p.occ !== undefined,
+    );
+  if (probes.length === 0) return 0;
+
+  const mats = new Map<number, Mat3>();
+  for (const p of probes) mats.set(p.i, rotationMatrix(p.pose));
+  const local = new Float64Array(3);
+  const proj = new Float64Array(3);
+  let dropped = 0;
+
+  for (let k = 0; k < count; k++) {
+    if (keep[k] === 0) continue;
+    const sk = source[k] as number;
+    const x = pos[k * 3] as number;
+    const y = pos[k * 3 + 1] as number;
+    const z = pos[k * 3 + 2] as number;
+    for (const p of probes) {
+      if (p.i === sk) continue; // 自分を見たカメラとは比べない
+      fromReference(mats.get(p.i) as Mat3, p.pose, p.frame, x, y, z, local);
+      if (
+        !project(local[0] as number, local[1] as number, local[2] as number, p.occ.camera, proj)
+      ) {
+        continue;
+      }
+      const ux = Math.round((proj[0] as number) - 0.5);
+      const uy = Math.round((proj[1] as number) - 0.5);
+      if (ux < 0 || uy < 0 || ux >= p.occ.width || uy >= p.occ.height) continue;
+      const seen = p.occ.depth[uy * p.occ.width + ux] as number;
+      if (!(seen > 0)) continue; // 被写体の外。何も言えない
+      // 観測した面より手前へ出ている量。許容を超えたら、そこに物は無い。
+      if (seen - (proj[2] as number) > tolerance) {
+        keep[k] = 0;
+        dropped++;
+        break;
+      }
+    }
+  }
+  return dropped;
 }
 
 /** 合成の内訳。落とした数を画面と検査に出すため。 */
@@ -119,6 +211,8 @@ export interface MergeStats {
   readonly dropped: number;
   /** 使った格子の目（基準座標の長さ）。 */
   readonly cell: number;
+  /** 「観測した面より手前」だったので落とした数。 */
+  readonly freeSpaceDropped: number;
   /** `keepSourceIds` を頼んだときだけ。残った点が、どの view から来たか。 */
   readonly sourceOf?: Uint16Array;
 }
@@ -302,7 +396,7 @@ export function mergeBuilds(
     const only = sources[0]?.build as SplatBuild;
     return {
       ...only,
-      mergeStats: { before: only.count, after: only.count, dropped: 0, cell: 0 },
+      mergeStats: { before: only.count, after: only.count, dropped: 0, cell: 0, freeSpaceDropped: 0 },
     };
   }
 
@@ -385,12 +479,23 @@ export function mergeBuilds(
     1e-9,
   );
   const cell = options.dedupe === false ? 0 : bodySize * (options.cellRatio ?? 0.02);
+
   const { keep, dropped } =
     cell > 0
       ? dropOverlaps(total, pos, nrm, source, faceOn, cell, [minX, minY, minZ], options.splitSides !== false)
       : { keep: new Uint8Array(total).fill(1), dropped: 0 };
 
-  const count = total - dropped;
+  // --- カメラが見通した空間に入った点を落とす
+  const freeDropped = dropFreeSpace(
+    total,
+    pos,
+    source,
+    sources,
+    bodySize * (options.freeSpaceRatio ?? 0.02),
+    keep,
+  );
+
+  const count = total - dropped - freeDropped;
 
   // --- 残った点で境界を取り直す
   //
@@ -474,6 +579,13 @@ export function mergeBuilds(
     metricHeight: Math.max(bMaxY - bMinY, 0),
     nearZ: Number.isFinite(outNear) ? outNear : 0.5,
     farZ: Number.isFinite(outFar) ? outFar : 1.5,
-    mergeStats: { before: total, after: count, dropped, cell, ...(sourceOf ? { sourceOf } : {}) },
+    mergeStats: {
+      before: total,
+      after: count,
+      dropped: dropped + freeDropped,
+      freeSpaceDropped: freeDropped,
+      cell,
+      ...(sourceOf ? { sourceOf } : {}),
+    },
   };
 }

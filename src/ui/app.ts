@@ -457,10 +457,16 @@ function multiStatsHtml(r: GenerateMultiResult): string {
          ? `<p class="note"><strong>枠を読み替えました: ${esc(flipped.join('、'))}。</strong>入れた写真の向きが枠と逆だったので、顔の向きから判断して直しました。</p>`
          : ''
      }
-     <p class="note">
-       <strong>色合わせはまだ入っていません（docs/12 §12.9）。</strong>
-       写真ごとの露出差が継ぎ目の色差として出ることがあります。
-     </p>
+     <div class="card warn" style="margin:10px 0">
+       <h3>この機能はまだ実験中です</h3>
+       <p style="margin:0">
+         <strong>正面から見たときは、1枚モードのほうがきれいです。</strong>
+         横向き写真の面が体の中央に寄って置かれてしまい、正面の顔や服の上に
+         淡い破片として出ます。原因は回転の中心の取り方で、直し方は分かって
+         いますが、まだ検証中です（docs/12 §12.16.7）。
+         色合わせ（§12.9）も未実装で、写真ごとの露出差が継ぎ目に出ます。
+       </p>
+     </div>
      <details><summary>view ごとの位置合わせ</summary><pre class="mono">${esc(rows)}</pre></details>`;
 }
 
