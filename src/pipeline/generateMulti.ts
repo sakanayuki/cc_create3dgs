@@ -455,6 +455,9 @@ export async function generateMulti(
     // **回転の中心は registerViews が返したものをそのまま使う。**
     // ここで重心を計算し直してはいけない。向こうは間引いた点で求めているので
     // 値が微妙にずれ、姿勢は正しいのに位置だけ食い違う。
+    // `occluder` は**まだ渡さない**。カメラが見通した空間の点を落とす仕掛けは
+    // 入れてあるが、回転の中心を直さないと逆効果だった（docs/12 §12.16.7）。
+    // 軸の修正が合成データの検査を通るまで、本番の経路は変えない。
     return { build: r.result.build, pose: view.pose, frame: view.frame };
   });
   const build = mergeBuilds(sources);

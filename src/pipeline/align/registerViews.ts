@@ -219,8 +219,12 @@ interface ViewPoints {
   readonly count: number;
   /** ヨーに対して変わらない縦の長さ（メートル）。尺度の拘束に使う。 */
   readonly verticalSpan: number;
-  /** 点の重心（この view のカメラ座標）。回転の中心になる。 */
+  /** 点の重心（この view のカメラ座標）。 */
   readonly centroid: readonly [number, number, number];
+  /** この view から見た被写体の横幅（メートル）。体の厚みを見積もるのに使う。 */
+  readonly widthX: number;
+  /** カメラにいちばん近い面の深度（メートル、下位 5%）。回転軸の基準。 */
+  readonly nearZ: number;
 }
 
 /**
@@ -284,7 +288,31 @@ function samplePoints(view: AlignView, target: number): ViewPoints {
     candidates > 0 ? ((vBottom - vTop + 1) * zMean) / view.camera.focalPx : 0;
 
   const inv = count > 0 ? 1 / count : 0;
-  return { x, y, z, count, verticalSpan, centroid: [cx * inv, cy * inv, cz * inv] };
+
+  // 横幅と、いちばん手前の面。回転軸の位置を決めるのに使う（§12.16.7）。
+  let xMin = Infinity;
+  let xMax = -Infinity;
+  for (let i = 0; i < count; i++) {
+    const v = x[i] as number;
+    if (v < xMin) xMin = v;
+    if (v > xMax) xMax = v;
+  }
+  // 手前の面は下位 5%。最小値だと1点の外れ値で決まってしまう。
+  const zs = new Float64Array(count);
+  zs.set(z.subarray(0, count));
+  zs.sort();
+  const nearZ = count > 0 ? (zs[Math.floor(count * 0.05)] as number) : 0;
+
+  return {
+    x,
+    y,
+    z,
+    count,
+    verticalSpan,
+    centroid: [cx * inv, cy * inv, cz * inv],
+    widthX: count > 0 ? xMax - xMin : 0,
+    nearZ,
+  };
 }
 
 /** 投影の覆いを描くための作業領域。評価のたびに使い回す。 */
@@ -314,6 +342,8 @@ export interface CostParts {
   readonly uncovered: number;
   /** 投影の縦の広がりと、マスクの縦の広がりの食い違い。 */
   readonly extent: number;
+  /** 観測した面より手前へ出てしまった量（自由空間の違反）。 */
+  readonly freeSpace: number;
   readonly total: number;
 }
 
@@ -348,6 +378,54 @@ const W_UNCOVERED = 0;
 const W_EXTENT = 0.15;
 
 /**
+ * **自由空間の違反**の重み（docs/12 §12.16.7）。
+ *
+ * ある view が観測した面より**手前**に、別の view の点が来てはいけない。
+ * そこはそのカメラが見通した空間で、物があれば写っていたはずである。
+ *
+ * ## なぜこれが要るのか
+ *
+ * 収まり（`containment`）だけで解くと、**全部を体の内側へ潰し込むのがいちばん
+ * 安い**。横向きの面を体の真ん中に置いても、正面のシルエットの内側には収まる
+ * ので、収まりの項は文句を言わない。実素材でまさにそうなった。
+ *
+ * | view | 置かれた x の中心 | 本来あるべき位置 |
+ * |---|---|---|
+ * | 正面 | 0.000 | 0（体の幅は ±0.17） |
+ * | 右向き | **−0.077** | 体の右端あたり |
+ * | 左向き | **+0.059** | 体の左端あたり |
+ *
+ * しかも潰れた面は正面が観測した面（z=0.669）より手前（z=0.641）に出るので、
+ * 顔の上に破片が乗る。**M1 = 0.969 という高い値は、正しく合ったからではなく
+ * 潰れているから出ていた。** 測っていた量が壊れ方を隠していた。
+ *
+ * 収まりが**横方向**を縛り、これが**奥行き**を縛る。二つで初めて置き場所が決まる。
+ *
+ * ## 片側だけ罰する
+ *
+ * 既存の `surface` 項は差の絶対値を見ていて、「面を奥へ逃がすほど良い」抜け道を
+ * 塞ぐために両側を見ていた。だが両側を見ると、共視が増える**低い角度**のほうが
+ * 安くなり、角度を過小に引っぱる（§12.15.2 でそれを理由に重みを 0 にした）。
+ *
+ * ## 入れてみたが、**悪くなったので 0 にした**
+ *
+ * 回転の中心を直した（下）うえで重みを振ると、実素材でこうなった。
+ *
+ * | 重み | 解いた yaw | M1（正面/右/左） |
+ * |---|---|---|
+ * | **0（採用）** | **93.6° / −87.0°** | **0.958 / 0.986 / 0.980** |
+ * | 0.5 | 112.4° / −100.6° | 0.903 / 0.881 / 0.866 |
+ * | 1.5 | 117.4° / −110.9° | 0.830 / 0.712 / 0.791 |
+ *
+ * 入れるほど角度が ±90° を通り越し、収まりも悪くなる。手前へ出た量を罰すると
+ * 「面を奥へ逃がす」方向に効き、余計に回してでも逃がそうとするためと見ている。
+ * 潰れの原因は目的関数ではなく**回転の中心**だった（下）ので、そちらを直せば
+ * この項は要らない。計算は残す（診断に出したいのと、次に試す人が同じ測定を
+ * 取り直せるように）。
+ */
+const W_FREESPACE = 0;
+
+/**
  * 目的関数。
  *
  * `containment` は「はみ出した距離の平均 ÷ 被写体の大きさ」、
@@ -368,6 +446,7 @@ function evaluate(
   let outSum = 0;
   let outCount = 0;
   let freeSum = 0;
+  let aheadSum = 0;
   let uncoveredSum = 0;
   let targets = 0;
   let extentSum = 0;
@@ -456,8 +535,12 @@ function evaluate(
         // ので、両側を見る。ゲートを超えた差は遮蔽とみなして頭打ちにする。
         const zSeen = gj.depth[idx] as number;
         if (zSeen > 0) {
-          const diff = Math.abs(zSeen - (scratch.proj[2] as number));
+          const zHere = scratch.proj[2] as number;
+          const diff = Math.abs(zSeen - zHere);
           freeSum += Math.min(SURFACE_GATE, diff) / SURFACE_GATE;
+          // 自由空間の違反。観測した面より**手前**にある量だけを罰する。
+          const ahead = zSeen - zHere;
+          if (ahead > 0) aheadSum += Math.min(SURFACE_GATE, ahead) / SURFACE_GATE;
         } else {
           freeSum += 1; // マスクの外に落ちた。合っていないので最大の罰
         }
@@ -504,6 +587,7 @@ function evaluate(
 
   const containment = outCount > 0 ? outSum / outCount : 0;
   const surface = outCount > 0 ? freeSum / outCount : 1;
+  const freeSpace = outCount > 0 ? aheadSum / outCount : 0;
   const uncoveredRatio = targets > 0 ? uncoveredSum / targets : 0;
   const extent = extentCount > 0 ? extentSum / extentCount : 0;
   return {
@@ -511,11 +595,13 @@ function evaluate(
     surface,
     uncovered: uncoveredRatio,
     extent,
+    freeSpace,
     total:
       W_CONTAINMENT * containment +
       W_SURFACE * surface +
       W_UNCOVERED * uncoveredRatio +
-      W_EXTENT * extent,
+      W_EXTENT * extent +
+      W_FREESPACE * freeSpace,
   };
 }
 
