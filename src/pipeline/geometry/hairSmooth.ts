@@ -21,7 +21,7 @@ export interface HairSmoothParams {
 }
 
 export const DEFAULT_HAIR_SMOOTH: HairSmoothParams = {
-  radiusRatio: 0.008,
+  radiusRatio: 0.02,
   passes: 3,
   darkerThan: 0.75,
 };
