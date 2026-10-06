@@ -218,6 +218,17 @@ const BOUNDARY_BAND_RATIO = 0.012;
  */
 const BODY_RELIEF_BOOST = 1;
 
+/**
+ * 顔の箱の中の強調。**1（掛けない）。**
+ *
+ * 顔の細部は landmark 面（`applyFaceRelief`）と頭のタイルが出すので、深度の
+ * 局所強調は要らない。むしろ有害だった。3 倍にすると髪の筋や頬の継ぎ目の
+ * 小さな深度差が 3 倍に引き伸ばされ、**30° 回しただけで顔が帯状にずれて
+ * 重なる**（実写 test26 を Pixel 7 相当・WebGL2 で撮って確認。顔の起伏・
+ * タイルを切っても出て、強調を 1 にすると消える）。正面からは見えない。
+ */
+const FACE_RELIEF_BOOST = 1;
+
 const AUX_BACKEND: Backend = 'wasm';
 
 /** セッションの入力名は1つとは限らないので、最初の1つに入れる。 */
@@ -1039,6 +1050,7 @@ export async function generate(photo: Blob, options: GenerateOptions): Promise<G
       alpha,
       kind: depthOut.kind,
       focalPx,
+      reliefBoost: FACE_RELIEF_BOOST,
       ...(boostBox ? { faceBox: boostBox, reliefBoostBody: BODY_RELIEF_BOOST } : {}),
     }),
   );
