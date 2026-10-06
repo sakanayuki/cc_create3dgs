@@ -22,6 +22,7 @@ import {
   headDepthTile,
   type FaceLandmark,
 } from './geometry/faceSurface';
+import { smoothHairDepth } from './geometry/hairSmooth';
 import {
   depthTiles,
   expandToSquare,
@@ -548,9 +549,15 @@ async function applyFaceDepth(
   backend: Backend,
   shaderF16: boolean,
   nativePatch: FacePatchSource | null = null,
-): Promise<{ depth: Float32Array; applied: boolean; headYawDeg: number | null }> {
+): Promise<{
+  depth: Float32Array;
+  applied: boolean;
+  headYawDeg: number | null;
+  /** 作業グリッドと同じ大きさの顔の重み。顔が立たなかったときは null。 */
+  faceMask: Float32Array | null;
+}> {
   const seed = headBoxFromMatte(alpha, grid, grid);
-  if (!seed) return { depth, applied: false, headYawDeg: null };
+  if (!seed) return { depth, applied: false, headYawDeg: null, faceMask: null };
 
   let session: ort.InferenceSession;
   try {
@@ -561,7 +568,7 @@ async function applyFaceDepth(
       shaderF16,
     );
   } catch {
-    return { depth, applied: false, headYawDeg: null };
+    return { depth, applied: false, headYawDeg: null, faceMask: null };
   }
 
   try {
@@ -588,17 +595,28 @@ async function applyFaceDepth(
     // 「枠の入れ違い」を見つけるのに足りる（docs/12 §12.15.5、§12.15.6）。
     const headYawDeg = best ? headYawFromLandmarks(best.points) : null;
 
-    if (!best || best.score < FACE_MIN_SCORE) return { depth, applied: false, headYawDeg };
+    if (!best || best.score < FACE_MIN_SCORE) return { depth, applied: false, headYawDeg, faceMask: null };
 
     const surface = faceDepthSurface(best.points, best.box);
-    if (surface.covered < FACE_MIN_PIXELS) return { depth, applied: false, headYawDeg };
+    if (surface.covered < FACE_MIN_PIXELS) return { depth, applied: false, headYawDeg, faceMask: null };
+    const faceMask = new Float32Array(grid * grid);
+    for (let y = 0; y < best.box.height; y++) {
+      const gy = best.box.y + y;
+      if (gy < 0 || gy >= grid) continue;
+      for (let x = 0; x < best.box.width; x++) {
+        const gx = best.box.x + x;
+        if (gx < 0 || gx >= grid) continue;
+        faceMask[gy * grid + gx] = surface.weight[y * best.box.width + x] as number;
+      }
+    }
     return {
       depth: applyFaceRelief(depth, surface, best.box, grid, grid, focalPx),
       applied: true,
       headYawDeg,
+      faceMask,
     };
   } catch {
-    return { depth, applied: false, headYawDeg: null };
+    return { depth, applied: false, headYawDeg: null, faceMask: null };
   }
 }
 
@@ -1033,6 +1051,14 @@ export async function generate(photo: Blob, options: GenerateOptions): Promise<G
       depthRaw = withFace.depth;
       faceApplied = withFace.applied;
       headYawDeg = withFace.headYawDeg;
+      // 髪の筋ごとの深度のばらつきを均す（docs/13 §13.5）。顔が立ったときだけ。
+      const hairBox = headBoxFromMatte(alpha, grid, grid);
+      if (withFace.faceMask && hairBox) {
+        const faceMask = withFace.faceMask;
+        depthRaw = await mark('髪の均し', () =>
+          smoothHairDepth(depthRaw, rgba, alpha, faceMask, grid, grid, hairBox),
+        );
+      }
     } finally {
       patch?.close();
     }
