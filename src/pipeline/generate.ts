@@ -1006,24 +1006,8 @@ export async function generate(photo: Blob, options: GenerateOptions): Promise<G
   const depthOut = await mark('深度推定', () => runDepth(rgba, grid, opts.backend, shaderF16));
   const focalPx = depthOut.focalPx ?? assumedFocal(grid);
 
-  // タイルパス。全体パスだけだと顔が「のっぺりした楕円」になる（docs/03 §3.4）。
   let depthRaw = depthOut.raw;
   let tileCount = 0;
-  if (opts.depthTiles !== false) {
-    report(0.5, '顔まわりの奥行きを詳しく見ています');
-    const tiled = await mark('深度タイルパス', () =>
-      runDepthTiles(
-        depthOut.session,
-        rgba,
-        depthOut.raw,
-        alpha,
-        grid,
-        depthOut.kind === 'inverse-depth',
-      ),
-    );
-    depthRaw = tiled.depth;
-    tileCount = tiled.tiles;
-  }
 
   // 顔の起伏。深度モデルは顔をほぼ平らな楕円として返すので、顔専用の
   // landmark モデルで細部の帯だけを差し替える（docs/09 §V9）。
@@ -1062,6 +1046,29 @@ export async function generate(photo: Blob, options: GenerateOptions): Promise<G
     } finally {
       patch?.close();
     }
+  }
+
+  // タイルパス。全体パスだけだと顔が「のっぺりした楕円」になる（docs/03 §3.4）。
+  //
+  // **顔が立ったときは掛けない（docs/13 §13.6）。** 顔は landmark 面が立てるので、
+  // タイルは要らない。むしろ有害だった。首をかしげた人物（test26）で、頭の
+  // タイルが髪の深度を壊し、45° から見ると髪が頭から長い斜めの帯になって
+  // 伸びた。タイルを掛けないと髪は頭に収まり、耳も出る（実写 3 枚で確認）。
+  // 顔が見つからない写真（横顔・物・遠景）だけ、従来どおりタイルで補う。
+  if (opts.depthTiles !== false && !faceApplied) {
+    report(0.5, '顔まわりの奥行きを詳しく見ています');
+    const tiled = await mark('深度タイルパス', () =>
+      runDepthTiles(
+        depthOut.session,
+        rgba,
+        depthOut.raw,
+        alpha,
+        grid,
+        depthOut.kind === 'inverse-depth',
+      ),
+    );
+    depthRaw = tiled.depth;
+    tileCount = tiled.tiles;
   }
 
   report(0.62, '奥行きを整えています');
